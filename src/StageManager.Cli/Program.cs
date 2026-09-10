@@ -25,7 +25,7 @@ switch (command)
         Console.WriteLine("""
             stagectl list              manageable windows as the engine sees them
             stagectl watch [seconds]   print window events for a while
-            stagectl snap <fg|0xHWND> [file.png]   capture a thumbnail the way the strip does
+            stagectl snap <fg|0xHWND> [file.png]   capture a window picture the way the app does
             stagectl plan              dry run: show what enabling Stage Manager would do, without touching windows
             """);
         return 0;
@@ -71,14 +71,15 @@ static int Snap(Win32WindowSystem ws, string target, string outputPath)
 
     var info = ws.GetWindowInfo(id);
     Console.WriteLine($"target: {id} {info?.ProcessName} | {info?.Title}");
-    var snapshot = ws.CaptureSnapshot(id, StageEngine.SnapshotMaxWidth, StageEngine.SnapshotMaxHeight);
+    var snapshot = ws.CaptureSnapshot(id, StageEngine.SnapshotMaxWidth, StageEngine.SnapshotMaxHeight, StageEngine.ThumbnailMaxWidth, StageEngine.ThumbnailMaxHeight);
     if (snapshot == null) { Console.WriteLine("capture failed"); return 1; }
 
     var bitmap = BitmapSource.Create(snapshot.Width, snapshot.Height, 96, 96, PixelFormats.Bgr32, null, snapshot.Bgra!, snapshot.Stride);
     var encoder = new PngBitmapEncoder();
     encoder.Frames.Add(BitmapFrame.Create(bitmap));
     using (var file = File.Create(outputPath)) encoder.Save(file);
-    Console.WriteLine($"saved {snapshot.Width}x{snapshot.Height} -> {Path.GetFullPath(outputPath)}");
+    var thumbnail = snapshot.Thumbnail is { } t ? $", thumbnail {t.Width}x{t.Height}" : "";
+    Console.WriteLine($"saved {snapshot.Width}x{snapshot.Height}{thumbnail} -> {Path.GetFullPath(outputPath)}");
     return 0;
 }
 
@@ -94,7 +95,7 @@ static int Bench(Win32WindowSystem ws, int seconds)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
         int n = 0;
-        while (sw.ElapsedMilliseconds < 1500) { ws.CaptureSnapshot(target, StageEngine.SnapshotMaxWidth, StageEngine.SnapshotMaxHeight, fromScreen); n++; }
+        while (sw.ElapsedMilliseconds < 1500) { ws.CaptureSnapshot(target, StageEngine.SnapshotMaxWidth, StageEngine.SnapshotMaxHeight, StageEngine.ThumbnailMaxWidth, StageEngine.ThumbnailMaxHeight, fromScreen); n++; }
         Console.WriteLine($"capture {(fromScreen ? "screen copy" : "PrintWindow ")}: {sw.ElapsedMilliseconds / (double)n:F1} ms each ({n} runs)");
     }
 
@@ -177,9 +178,9 @@ sealed class DryRunWindowSystem : IWindowSystem
     public void SetBounds(WindowId id, RectPx bounds) { _pretendBounds[id] = bounds; Ops.Add($"move     {Describe(id)} -> {bounds}"); }
     public bool Activate(WindowId id) { Ops.Add($"activate {Describe(id)}"); return true; }
 
-    public Snapshot? CaptureSnapshot(WindowId id, int maxWidth, int maxHeight, bool fromScreen = false)
+    public Snapshot? CaptureSnapshot(WindowId id, int maxWidth, int maxHeight, int thumbnailWidth = 0, int thumbnailHeight = 0, bool fromScreen = false)
     {
-        var snap = _real.CaptureSnapshot(id, maxWidth, maxHeight, fromScreen);
+        var snap = _real.CaptureSnapshot(id, maxWidth, maxHeight, thumbnailWidth, thumbnailHeight, fromScreen);
         Ops.Add($"snapshot {Describe(id)} -> {(snap == null ? "failed" : $"{snap.Width}x{snap.Height}")}");
         return snap;
     }

@@ -172,14 +172,14 @@ public sealed unsafe class Win32WindowSystem : IWindowSystem, IDisposable
 
     private readonly object _captureLock = new();
     private CaptureSurface _full;  // the window at full size
-    private CaptureSurface _small; // the shrunken picture
+    private CaptureSurface _small; // a scaled-down copy
 
     /// <summary>
     /// PrintWindow asks the window to render itself, which works even when it is covered and, under DWM, is
     /// about twice as fast as copying the screen. The screen copy remains as the fallback for windows that
     /// render nothing, and as an explicit option.
     /// </summary>
-    public Snapshot? CaptureSnapshot(WindowId id, int maxWidth, int maxHeight, bool fromScreen = false)
+    public Snapshot? CaptureSnapshot(WindowId id, int maxWidth, int maxHeight, int thumbnailWidth = 0, int thumbnailHeight = 0, bool fromScreen = false)
     {
         var hwnd = ToHwnd(id);
         if (!PInvoke.IsWindow(hwnd) || PInvoke.IsIconic(hwnd)) return null;
@@ -206,7 +206,14 @@ public sealed unsafe class Win32WindowSystem : IWindowSystem, IDisposable
                 bool ok = !fromScreen && PInvoke.PrintWindow(hwnd, _full.Dc, (PRINT_WINDOW_FLAGS)PW_RENDERFULLCONTENT);
                 if (!ok || LooksBlank(_full, w, h))
                     PInvoke.BitBlt(_full.Dc, 0, 0, w, h, screen, rc.left, rc.top, ROP_CODE.SRCCOPY);
-                return Shrink(screen, w, h, crop, maxWidth, maxHeight);
+
+                var picture = CopyOut(screen, crop, maxWidth, maxHeight);
+                if (picture == null) return null;
+                PixelBuffer? thumbnail = null;
+                if (thumbnailWidth > 0 && thumbnailHeight > 0 && (picture.Width > thumbnailWidth || picture.Height > thumbnailHeight))
+                    thumbnail = CopyOut(screen, crop, thumbnailWidth, thumbnailHeight);
+                var insets = new Insets(crop.Left, crop.Top, w - crop.Right, h - crop.Bottom);
+                return new Snapshot(picture.Width, picture.Height, picture.Bgra!, DateTimeOffset.UtcNow, insets, thumbnail);
             }
             finally { PInvoke.ReleaseDC(HWND.Null, screen); }
         }
@@ -259,29 +266,42 @@ public sealed unsafe class Win32WindowSystem : IWindowSystem, IDisposable
         return true;
     }
 
-    /// <summary>Scales the cropped region of the full surface down with GDI's halftone (box) filter and copies the pixels out.</summary>
-    private Snapshot? Shrink(HDC screen, int srcWidth, int srcHeight, RectPx crop, int maxWidth, int maxHeight)
+    /// <summary>
+    /// Copies the cropped region of the full surface out into a managed array: straight from the surface when it
+    /// fits <paramref name="maxWidth"/> x <paramref name="maxHeight"/>, otherwise scaled down first with GDI's
+    /// halftone (box) filter. Alpha is left as GDI wrote it; consumers read the pixels as Bgr32 and ignore it.
+    /// </summary>
+    private PixelBuffer? CopyOut(HDC screen, RectPx crop, int maxWidth, int maxHeight)
     {
-        var insets = new Insets(crop.Left, crop.Top, srcWidth - crop.Right, srcHeight - crop.Bottom);
         int cw = crop.Width, ch = crop.Height;
         double scale = Math.Min(1.0, Math.Min((double)maxWidth / cw, (double)maxHeight / ch));
         int dw = Math.Max(1, (int)(cw * scale)), dh = Math.Max(1, (int)(ch * scale));
-        if (!EnsureSurface(ref _small, screen, dw, dh)) return null;
 
-        PInvoke.SetStretchBltMode(_small.Dc, STRETCH_BLT_MODE.HALFTONE);
-        PInvoke.SetBrushOrgEx(_small.Dc, 0, 0, null);
-        PInvoke.StretchBlt(_small.Dc, 0, 0, dw, dh, _full.Dc, crop.Left, crop.Top, cw, ch, ROP_CODE.SRCCOPY);
+        byte* src;
+        int srcStride;
+        if (dw == cw && dh == ch)
+        {
+            src = (byte*)_full.Bits + (long)crop.Top * _full.Stride + crop.Left * 4;
+            srcStride = _full.Stride;
+        }
+        else
+        {
+            if (!EnsureSurface(ref _small, screen, dw, dh)) return null;
+            PInvoke.SetStretchBltMode(_small.Dc, STRETCH_BLT_MODE.HALFTONE);
+            PInvoke.SetBrushOrgEx(_small.Dc, 0, 0, null);
+            PInvoke.StretchBlt(_small.Dc, 0, 0, dw, dh, _full.Dc, crop.Left, crop.Top, cw, ch, ROP_CODE.SRCCOPY);
+            src = (byte*)_small.Bits;
+            srcStride = _small.Stride;
+        }
 
         var dst = new byte[dw * dh * 4];
         int rowBytes = dw * 4;
-        byte* src = (byte*)_small.Bits;
         fixed (byte* d = dst)
         {
             for (int y = 0; y < dh; y++)
-                Buffer.MemoryCopy(src + (long)y * _small.Stride, d + (long)y * rowBytes, rowBytes, rowBytes);
+                Buffer.MemoryCopy(src + (long)y * srcStride, d + (long)y * rowBytes, rowBytes, rowBytes);
         }
-        for (int i = 3; i < dst.Length; i += 4) dst[i] = 255; // GDI leaves alpha undefined
-        return new Snapshot(dw, dh, dst, DateTimeOffset.UtcNow, insets);
+        return new PixelBuffer(dw, dh, dst);
     }
 
     private static void ReleaseSurface(ref CaptureSurface s)

@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -19,7 +20,7 @@ public partial class StripWindow : Window
     private const double MarginDip = 12;
     private const int DragThresholdPx = 6;
     private static readonly TimeSpan SwapDuration = TimeSpan.FromMilliseconds(450);
-    private static readonly TimeSpan RevealDelay = TimeSpan.FromMilliseconds(120);
+    private static readonly TimeSpan RevealFade = TimeSpan.FromMilliseconds(260); // the pictures dissolve into the real windows over this
     private static readonly TimeSpan CardSlideDuration = TimeSpan.FromMilliseconds(320);
     private static readonly TimeSpan CardFadeDuration = TimeSpan.FromMilliseconds(160);
     private static readonly TimeSpan StripSlideDuration = TimeSpan.FromMilliseconds(220);
@@ -29,7 +30,7 @@ public partial class StripWindow : Window
 
     private readonly StageEngine _engine;
     private readonly IWindowSystem _ws;
-    private readonly Dictionary<WindowId, (Snapshot Snapshot, BitmapSource Bitmap)> _thumbnails = new();
+    private readonly Dictionary<WindowId, Picture> _pictures = new();
     private readonly Dictionary<string, BitmapSource?> _icons = new(StringComparer.OrdinalIgnoreCase);
     private readonly DispatcherTimer _pressTimer;
     private readonly DispatcherTimer _windowDragTimer;
@@ -108,7 +109,7 @@ public partial class StripWindow : Window
             Hide();
             _overlay?.HideNow();
             Items.Clear();
-            _thumbnails.Clear(); // the engine forgot every window, so their pictures go too
+            _pictures.Clear(); // the engine forgot every window, so their pictures go too
             _peekTimer.Stop();
             _peeking = false;
             _slidOut = false;
@@ -140,7 +141,8 @@ public partial class StripWindow : Window
                 Populate(item);
             }
         });
-        PruneThumbnails();
+        IngestNewSnapshots();
+        PrunePictures();
         if (!IsVisible) Show();
         UpdateCoverage();
     }
@@ -293,35 +295,133 @@ public partial class StripWindow : Window
         var primary = _engine.GetWindow(primaryId) ?? _engine.GetWindow(stage.Windows[0]);
         var withSnapshot = stage.Windows.Select(_engine.GetWindow).FirstOrDefault(w => w?.Snapshot != null);
 
-        item.Thumbnail = withSnapshot?.Snapshot is { } snapshot ? GetThumbnail(withSnapshot.Info.Id, snapshot) : null;
+        item.Thumbnail = withSnapshot?.Snapshot is { } snapshot ? CardPicture(withSnapshot.Info.Id, snapshot) : null;
         item.Icon = GetIcon(primary?.Info.ExecutablePath);
         item.Title = primary?.Info.Title ?? stage.Label;
         item.Label = stage.Label;
         item.Count = stage.Windows.Count;
     }
 
-    private BitmapSource GetThumbnail(WindowId id, Snapshot snapshot)
-    {
-        if (_thumbnails.TryGetValue(id, out var cached) && ReferenceEquals(cached.Snapshot, snapshot))
-            return cached.Bitmap;
-        if (snapshot.Bgra == null)
-            return cached.Bitmap ?? BitmapSource.Create(1, 1, 96, 96, PixelFormats.Bgr32, null, new byte[4], 4); // pixels already handed over
+    // ---------------------------------------------------------------- pictures
 
-        var bitmap = BitmapSource.Create(snapshot.Width, snapshot.Height, 96, 96, PixelFormats.Bgr32, null, snapshot.Bgra, snapshot.Stride);
-        bitmap.Freeze();
-        snapshot.ReleasePixels(); // the bitmap now owns the only copy
-        _thumbnails[id] = (snapshot, bitmap);
-        return bitmap;
+    /// <summary>
+    /// What the strip keeps of one window's snapshot: a card-sized bitmap made right away, and the full picture as a
+    /// JPEG once a worker has encoded it. The raw pixels are released at that point, so a parked window costs about a
+    /// megabyte rather than the tens of megabytes the raw picture of a large window takes.
+    /// </summary>
+    private sealed class Picture
+    {
+        public required Snapshot Snapshot { get; init; }
+        public required BitmapSource Card { get; init; }
+
+        /// <summary>The full picture when it is no bigger than a card, so nothing had to be encoded.</summary>
+        public BitmapSource? Full { get; init; }
+
+        /// <summary>The full picture, JPEG-encoded; null until the worker is done (the snapshot still holds the pixels then).</summary>
+        public byte[]? Jpeg { get; set; }
+    }
+
+    private static readonly BitmapSource BlankPicture = ToBitmap(1, 1, new byte[4]);
+
+    private BitmapSource CardPicture(WindowId id, Snapshot snapshot) => Ingest(id, snapshot).Card;
+
+    /// <summary>The picture of a window at the size it flies at: the raw pixels while they are around, the decoded JPEG afterwards.</summary>
+    private BitmapSource FlightPicture(WindowId id, Snapshot snapshot)
+    {
+        var picture = Ingest(id, snapshot);
+        if (picture.Full != null) return picture.Full;
+        if (snapshot.Bgra is { } pixels) return ToBitmap(snapshot.Width, snapshot.Height, pixels);
+        if (picture.Jpeg is { } jpeg)
+        {
+            try { return DecodeJpeg(jpeg); }
+            catch (Exception ex) { Log.Write("picture decoding failed: " + ex.Message); }
+        }
+        return picture.Card;
     }
 
     /// <summary>
-    /// Drops the pictures of windows the engine no longer tracks. Each is up to a couple of megabytes, and without
-    /// this every window ever closed would keep one alive for the life of the process.
+    /// Takes a snapshot's pixels into the strip's own bitmaps; a snapshot seen before is returned as is. With
+    /// <paramref name="jpeg"/> already encoded (by the prefetch worker) nothing is left to do in the background.
     /// </summary>
-    private void PruneThumbnails()
+    private Picture Ingest(WindowId id, Snapshot snapshot, byte[]? jpeg = null)
     {
-        foreach (var id in _thumbnails.Keys.Where(id => _engine.GetWindow(id) == null).ToList())
-            _thumbnails.Remove(id);
+        if (_pictures.TryGetValue(id, out var existing) && ReferenceEquals(existing.Snapshot, snapshot)) return existing;
+
+        Picture picture;
+        if (snapshot.Thumbnail is { } thumbnail)
+        {
+            var card = thumbnail.Bgra is { } small ? ToBitmap(thumbnail.Width, thumbnail.Height, small) : existing?.Card ?? BlankPicture;
+            thumbnail.Release();
+            picture = new Picture { Snapshot = snapshot, Card = card, Jpeg = jpeg };
+            if (jpeg != null) snapshot.ReleasePixels();
+            else if (snapshot.Bgra != null) _ = EncodeAsync(picture);
+        }
+        else
+        {
+            // The picture itself fits a card: one bitmap serves both the card and a flight.
+            var full = snapshot.Bgra is { } pixels ? ToBitmap(snapshot.Width, snapshot.Height, pixels) : existing?.Full ?? existing?.Card ?? BlankPicture;
+            snapshot.ReleasePixels();
+            picture = new Picture { Snapshot = snapshot, Card = full, Full = full };
+        }
+        _pictures[id] = picture;
+        return picture;
+    }
+
+    private async Task EncodeAsync(Picture picture)
+    {
+        var snapshot = picture.Snapshot;
+        var pixels = snapshot.Bgra!;
+        try
+        {
+            picture.Jpeg = await Task.Run(() => EncodeJpeg(snapshot.Width, snapshot.Height, pixels));
+            snapshot.ReleasePixels();
+        }
+        catch (Exception ex)
+        {
+            Log.Write("picture encoding failed: " + ex.Message); // the raw pixels stay and serve flights as before
+        }
+    }
+
+    /// <summary>
+    /// Converts snapshots the engine took since the last refresh, including those of windows on other virtual
+    /// desktops that no card shows, so no raw picture stays around longer than it takes to encode it.
+    /// </summary>
+    private void IngestNewSnapshots()
+    {
+        foreach (var w in _engine.TrackedWindows)
+            if (w.Snapshot is { Bgra: not null } snapshot) Ingest(w.Info.Id, snapshot);
+    }
+
+    /// <summary>Drops the pictures of windows the engine no longer tracks; without this every window ever closed would keep one alive.</summary>
+    private void PrunePictures()
+    {
+        foreach (var id in _pictures.Keys.Where(id => _engine.GetWindow(id) == null).ToList())
+            _pictures.Remove(id);
+    }
+
+    private static BitmapSource ToBitmap(int width, int height, byte[] bgra)
+    {
+        var bitmap = BitmapSource.Create(width, height, 96, 96, PixelFormats.Bgr32, null, bgra, width * 4);
+        bitmap.Freeze();
+        return bitmap;
+    }
+
+    /// <summary>JPEG at quality 90: a screenful of UI compresses to about a megabyte and decodes in tens of milliseconds. Safe on any thread.</summary>
+    private static byte[] EncodeJpeg(int width, int height, byte[] bgra)
+    {
+        var encoder = new JpegBitmapEncoder { QualityLevel = 90 };
+        encoder.Frames.Add(BitmapFrame.Create(BitmapSource.Create(width, height, 96, 96, PixelFormats.Bgr32, null, bgra, width * 4)));
+        using var stream = new MemoryStream();
+        encoder.Save(stream);
+        return stream.ToArray();
+    }
+
+    private static BitmapSource DecodeJpeg(byte[] jpeg)
+    {
+        using var stream = new MemoryStream(jpeg);
+        var frame = new JpegBitmapDecoder(stream, BitmapCreateOptions.None, BitmapCacheOption.OnLoad).Frames[0];
+        frame.Freeze();
+        return frame;
     }
 
     private BitmapSource? GetIcon(string? executablePath)
@@ -396,8 +496,15 @@ public partial class StripWindow : Window
         {
             try
             {
-                var snapshot = await Task.Run(() => _ws.CaptureSnapshot(id, StageEngine.SnapshotMaxWidth, StageEngine.SnapshotMaxHeight));
-                if (snapshot != null) _engine.StoreSnapshot(id, snapshot); // back on the UI thread
+                // The capture and the JPEG encoding both happen on the worker; the UI thread only takes the results.
+                var (snapshot, jpeg) = await Task.Run(() =>
+                {
+                    var s = _ws.CaptureSnapshot(id, StageEngine.SnapshotMaxWidth, StageEngine.SnapshotMaxHeight, StageEngine.ThumbnailMaxWidth, StageEngine.ThumbnailMaxHeight);
+                    return (s, s is { Thumbnail: not null, Bgra: { } pixels } ? EncodeJpeg(s.Width, s.Height, pixels) : null);
+                });
+                if (snapshot == null) continue;
+                _engine.StoreSnapshot(id, snapshot); // back on the UI thread; ignored when the window has been parked meanwhile
+                if (_engine.GetWindow(id)?.Snapshot == snapshot) Ingest(id, snapshot, jpeg);
             }
             catch (Exception ex)
             {
@@ -415,6 +522,40 @@ public partial class StripWindow : Window
     {
         if (_prefetch.IsCompleted) return;
         await Task.WhenAny(_prefetch, Task.Delay(250));
+    }
+
+    /// <summary>A stored picture decoded ahead of a swap, tied to the snapshot it came from.</summary>
+    private sealed record WarmPicture(WindowId Id, Snapshot Snapshot, BitmapSource Image);
+
+    private Task<List<WarmPicture>>? _warm;
+
+    /// <summary>
+    /// Decodes the stored pictures of a stage on a worker thread while the button is still down, so a click can
+    /// start its animation without first spending tens of milliseconds decoding on the UI thread.
+    /// </summary>
+    private Task<List<WarmPicture>> WarmFlightPicturesAsync(Stage stage)
+    {
+        var encoded = new List<(WindowId Id, Snapshot Snapshot, byte[] Jpeg)>();
+        foreach (var id in stage.Windows)
+        {
+            if (_engine.GetWindow(id)?.Snapshot is { } snapshot && _pictures.TryGetValue(id, out var picture)
+                && ReferenceEquals(picture.Snapshot, snapshot) && picture.Jpeg is { } jpeg)
+                encoded.Add((id, snapshot, jpeg));
+        }
+        if (encoded.Count == 0) return Task.FromResult(new List<WarmPicture>());
+        return Task.Run(() => encoded.Select(e => new WarmPicture(e.Id, e.Snapshot, DecodeJpeg(e.Jpeg))).ToList());
+    }
+
+    /// <summary>The warmed pictures if they are ready soon; otherwise none, and they are decoded on demand.</summary>
+    private async Task<List<WarmPicture>> WarmedAsync()
+    {
+        var warm = _warm;
+        _warm = null;
+        if (warm == null) return new List<WarmPicture>();
+        await Task.WhenAny(warm, Task.Delay(150));
+        if (warm.IsCompletedSuccessfully) return warm.Result;
+        if (warm.IsFaulted) Log.Write("warming pictures failed: " + warm.Exception?.GetBaseException().Message);
+        return new List<WarmPicture>();
     }
 
     // ---------------------------------------------------------------- pressing and dragging cards
@@ -454,6 +595,7 @@ public partial class StripWindow : Window
             Start = cursor,
             ThumbRect = ScreenRectOf(item) ?? RectPx.FromSize(cursor.X - 80, cursor.Y - 50, 160, 100),
         };
+        _warm = WarmFlightPicturesAsync(item.Stage); // decoded while the button is down, so a click does not wait for it
         _pressTimer.Start();
     }
 
@@ -528,14 +670,14 @@ public partial class StripWindow : Window
         try
         {
             var visible = lead.Snapshot.VisibleArea(lead.Bounds);
-            var flights = new List<SwapOverlay.Flight> { new(GetThumbnail(lead.Id, lead.Snapshot), from.Value, visible) };
+            var flights = new List<SwapOverlay.Flight> { new(FlightPicture(lead.Id, lead.Snapshot), from.Value, visible) };
             var overlay = Overlay();
             await overlay.PresentAsync(flights, _ws.GetPrimaryWorkArea()); // replaces the ghost with the same picture in the same place
             await overlay.AnimateAsync(SwapDuration);
             _engine.MergeIntoActive(stage, anchor, suppressTransitions: true); // the real windows appear underneath the picture
             _suppressRefresh = false;
             Refresh();
-            await Task.Delay(RevealDelay);
+            await overlay.FadeOutAsync(RevealFade); // the picture dissolves into the real window rather than snapping to it
         }
         catch (Exception ex)
         {
@@ -597,7 +739,7 @@ public partial class StripWindow : Window
             var visible = picture.Snapshot.VisibleArea(picture.Bounds);
             var flights = new List<SwapOverlay.Flight>
             {
-                new(GetThumbnail(id, picture.Snapshot), visible, FitInto(visible, topSlot)),
+                new(FlightPicture(id, picture.Snapshot), visible, FitInto(visible, topSlot)),
             };
 
             var overlay = Overlay();
@@ -606,7 +748,7 @@ public partial class StripWindow : Window
             await overlay.AnimateAsync(SwapDuration);
             _suppressRefresh = false;
             Refresh(); // the new card fades in underneath the picture
-            await Task.Delay(RevealDelay);
+            await overlay.FadeOutAsync(RevealFade);
         }
         catch (Exception ex)
         {
@@ -634,6 +776,7 @@ public partial class StripWindow : Window
         if (_swapInProgress) return;
         _swapInProgress = true; // reserve the slot while we wait; released below or in finally
         await AwaitPrefetchAsync();
+        var warm = await WarmedAsync();
         _swapInProgress = false;
         var clock = System.Diagnostics.Stopwatch.StartNew();
         var swap = _engine.PrepareSwap(item.Stage, suppressTransitions: true);
@@ -655,13 +798,14 @@ public partial class StripWindow : Window
             {
                 if (o.Snapshot == null) continue;
                 var visible = o.Snapshot.VisibleArea(o.Bounds);
-                flights.Add(new SwapOverlay.Flight(GetThumbnail(o.Id, o.Snapshot), visible, FitInto(visible, topSlot)));
+                flights.Add(new SwapOverlay.Flight(FlightPicture(o.Id, o.Snapshot), visible, FitInto(visible, topSlot)));
             }
             foreach (var i in swap.Incoming)
             {
                 if (i.Snapshot == null) continue;
                 var visible = i.Snapshot.VisibleArea(i.Bounds);
-                flights.Add(new SwapOverlay.Flight(GetThumbnail(i.Id, i.Snapshot), FitInto(visible, cardRect), visible));
+                var image = warm.FirstOrDefault(p => p.Id == i.Id && ReferenceEquals(p.Snapshot, i.Snapshot))?.Image ?? FlightPicture(i.Id, i.Snapshot);
+                flights.Add(new SwapOverlay.Flight(image, FitInto(visible, cardRect), visible));
             }
 
             if (flights.Count == 0)
@@ -679,7 +823,7 @@ public partial class StripWindow : Window
             animated = clock.ElapsedMilliseconds;
             _engine.CommitPresent(swap);   // the real incoming windows appear underneath their pictures; the new card fades in
             presented = clock.ElapsedMilliseconds;
-            await Task.Delay(RevealDelay); // give them a moment to paint before the pictures go away
+            await overlay.FadeOutAsync(RevealFade); // the pictures dissolve into the real windows as they paint
             Log.Write($"swap timing ms: prepare {prepared}, overlay {shown - prepared}, park {parked - shown}, animate {animated - parked}, present {presented - animated}");
         }
         catch (Exception ex)

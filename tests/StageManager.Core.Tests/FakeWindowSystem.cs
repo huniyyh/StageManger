@@ -90,7 +90,7 @@ internal sealed class FakeWindowSystem : IWindowSystem
 
     public int CaptureCount { get; private set; }
 
-    public Snapshot? CaptureSnapshot(WindowId id, int maxWidth, int maxHeight, bool fromScreen = false)
+    public Snapshot? CaptureSnapshot(WindowId id, int maxWidth, int maxHeight, int thumbnailWidth = 0, int thumbnailHeight = 0, bool fromScreen = false)
     {
         if (Windows[id].Minimized) return null;
         CaptureCount++;

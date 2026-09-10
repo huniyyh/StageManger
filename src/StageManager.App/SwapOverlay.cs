@@ -166,6 +166,24 @@ internal sealed class SwapOverlay : Window
         return Task.WhenAny(done.Task, Task.Delay(duration + TimeSpan.FromMilliseconds(500)));
     }
 
+    /// <summary>
+    /// Dissolves the pictures over <paramref name="duration"/>. A picture is a scaled snapshot and the window
+    /// underneath is sharper, so fading rather than cutting keeps the hand-over from reading as a snap into focus;
+    /// it also covers the first frames in which a freshly shown window may not have painted yet.
+    /// </summary>
+    public Task FadeOutAsync(TimeSpan duration)
+    {
+        if (_flights.Count == 0) return Task.CompletedTask;
+        var done = new TaskCompletionSource();
+        var storyboard = new Storyboard();
+        var easing = new SineEase { EasingMode = EasingMode.EaseInOut };
+        foreach (var (element, _) in _flights)
+            storyboard.Children.Add(Animate(element, OpacityProperty, 0, duration, easing));
+        storyboard.Completed += (_, _) => done.TrySetResult();
+        storyboard.Begin(this);
+        return Task.WhenAny(done.Task, Task.Delay(duration + TimeSpan.FromMilliseconds(500)));
+    }
+
     /// <summary>Removes the pictures; the overlay stays open until <see cref="ReleaseSoon"/> or <see cref="HideNow"/>.</summary>
     public void Dismiss()
     {

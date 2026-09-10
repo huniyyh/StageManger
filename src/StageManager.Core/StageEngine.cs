@@ -7,8 +7,16 @@ namespace StageManager.Core;
 /// </summary>
 public sealed class StageEngine
 {
-    public const int SnapshotMaxWidth = 800;
-    public const int SnapshotMaxHeight = 600;
+    /// <summary>
+    /// Upper bound of a window's picture. During a swap the picture stands in for the window at full size, so it is
+    /// kept near screen resolution; the app compresses it once it has been shown and works the strip from the thumbnail.
+    /// </summary>
+    public const int SnapshotMaxWidth = 2560;
+    public const int SnapshotMaxHeight = 1600;
+
+    /// <summary>Upper bound of the small copy the strip cards show. Covers a card up to 250% display scaling.</summary>
+    public const int ThumbnailMaxWidth = 400;
+    public const int ThumbnailMaxHeight = 300;
 
     /// <summary>How long a newly shown background window may wait to become foreground before it is parked.</summary>
     public static readonly TimeSpan PendingDelay = TimeSpan.FromMilliseconds(400);
@@ -71,6 +79,9 @@ public sealed class StageEngine
 
     /// <summary>Windows currently minimized by the engine on any desktop; persisted so a crash can be undone.</summary>
     public IReadOnlyList<WindowId> ParkedByUs => _windows.Where(kv => kv.Value.ParkedByUs).Select(kv => kv.Key).ToList();
+
+    /// <summary>Every window the engine knows about, on any desktop.</summary>
+    public IEnumerable<TrackedWindow> TrackedWindows => _windows.Values;
 
     /// <summary>
     /// True when a visible window of the active stage is maximized or lies over the strip, so the strip should get
@@ -348,7 +359,7 @@ public sealed class StageEngine
 
     private void CaptureInto(TrackedWindow w)
     {
-        var snap = _ws.CaptureSnapshot(w.Info.Id, SnapshotMaxWidth, SnapshotMaxHeight);
+        var snap = _ws.CaptureSnapshot(w.Info.Id, SnapshotMaxWidth, SnapshotMaxHeight, ThumbnailMaxWidth, ThumbnailMaxHeight);
         if (snap == null) return;
         w.Snapshot = snap;
         w.SnapshotTakenAt = _clock();

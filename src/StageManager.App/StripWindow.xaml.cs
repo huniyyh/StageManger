@@ -106,7 +106,7 @@ public partial class StripWindow : Window
         if (!_engine.IsEnabled)
         {
             Hide();
-            _overlay?.Hide();
+            _overlay?.HideNow();
             Items.Clear();
             _peekTimer.Stop();
             _peeking = false;
@@ -141,9 +141,6 @@ public partial class StripWindow : Window
         });
         if (!IsVisible) Show();
         UpdateCoverage();
-
-        _overlay ??= new SwapOverlay();
-        _overlay.EnsureVisible(_ws.GetPrimaryWorkArea());
     }
 
     // ---------------------------------------------------------------- getting out of the way
@@ -342,12 +339,22 @@ public partial class StripWindow : Window
         return result;
     }
 
-    // The pointer arriving over the strip usually means a click is coming: take the outgoing pictures now,
-    // so the swap itself does not have to wait for a capture.
+    private SwapOverlay Overlay() => _overlay ??= new SwapOverlay();
+
+    // The pointer arriving over the strip usually means a click is coming: take the outgoing pictures now and
+    // bring the overlay up, so the swap itself waits for neither.
     protected override void OnMouseEnter(MouseEventArgs e)
     {
         base.OnMouseEnter(e);
-        if (!_swapInProgress) _ = PrefetchAsync(TimeSpan.FromMilliseconds(300));
+        if (_swapInProgress || !_engine.IsEnabled) return;
+        _ = PrefetchAsync(TimeSpan.FromMilliseconds(300));
+        Overlay().EnsureVisible(_ws.GetPrimaryWorkArea());
+    }
+
+    protected override void OnMouseLeave(MouseEventArgs e)
+    {
+        base.OnMouseLeave(e);
+        if (!_swapInProgress && _press == null) _overlay?.ReleaseSoon();
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
@@ -457,9 +464,7 @@ public partial class StripWindow : Window
             press.Card.Opacity = 0.35;
             if (press.Item.Thumbnail != null)
             {
-                _overlay ??= new SwapOverlay();
-                _overlay.EnsureVisible(_ws.GetPrimaryWorkArea());
-                _overlay.ShowGhost(press.Item.Thumbnail, GhostRect(press, cursor));
+                Overlay().ShowGhost(press.Item.Thumbnail, GhostRect(press, cursor), _ws.GetPrimaryWorkArea());
             }
         }
         if (press.Dragging) _overlay?.MoveGhost(GhostRect(press, cursor));
@@ -480,6 +485,7 @@ public partial class StripWindow : Window
         if (backOnStrip)
         {
             _overlay?.HideGhost();
+            _overlay?.ReleaseSoon();
             return;
         }
         _ = MergeWithAnimationAsync(press.Item.Stage, cursor, GhostRect(press, cursor));
@@ -500,6 +506,7 @@ public partial class StripWindow : Window
         if (lead?.Snapshot == null || from == null || _swapInProgress)
         {
             _overlay?.HideGhost();
+            _overlay?.ReleaseSoon();
             _engine.MergeIntoActive(stage, anchor, suppressTransitions: true);
             return;
         }
@@ -510,9 +517,7 @@ public partial class StripWindow : Window
         {
             var visible = lead.Snapshot.VisibleArea(lead.Bounds);
             var flights = new List<SwapOverlay.Flight> { new(GetThumbnail(lead.Id, lead.Snapshot), from.Value, visible) };
-            _overlay ??= new SwapOverlay();
-            _overlay.EnsureVisible(_ws.GetPrimaryWorkArea());
-            await _overlay.PresentAsync(flights); // replaces the ghost with the same picture in the same place
+            await Overlay().PresentAsync(flights, _ws.GetPrimaryWorkArea()); // replaces the ghost with the same picture in the same place
             await _overlay.AnimateAsync(SwapDuration);
             _engine.MergeIntoActive(stage, anchor, suppressTransitions: true); // the real windows appear underneath the picture
             _suppressRefresh = false;
@@ -527,6 +532,7 @@ public partial class StripWindow : Window
         finally
         {
             _overlay?.Dismiss();
+            _overlay?.ReleaseSoon();
             _swapInProgress = false;
             _suppressRefresh = false;
             Refresh();
@@ -540,10 +546,12 @@ public partial class StripWindow : Window
         if (dragging)
         {
             _windowDragTimer.Start();
+            Overlay().EnsureVisible(_ws.GetPrimaryWorkArea()); // ready in case the drag ends on the strip
             return;
         }
         _windowDragTimer.Stop();
         DropHighlight.Visibility = Visibility.Collapsed;
+        if (!_swapInProgress) _overlay?.ReleaseSoon();
     }
 
     private void OnWindowDragTick(object? sender, EventArgs e)
@@ -579,9 +587,7 @@ public partial class StripWindow : Window
                 new(GetThumbnail(id, picture.Snapshot), visible, FitInto(visible, topSlot)),
             };
 
-            _overlay ??= new SwapOverlay();
-            _overlay.EnsureVisible(_ws.GetPrimaryWorkArea());
-            await _overlay.PresentAsync(flights);
+            await Overlay().PresentAsync(flights, _ws.GetPrimaryWorkArea());
             _engine.CommitDetach(id, suppressTransitions: true); // the real window vanishes underneath its picture
             await _overlay.AnimateAsync(SwapDuration);
             _suppressRefresh = false;
@@ -596,6 +602,7 @@ public partial class StripWindow : Window
         finally
         {
             _overlay?.Dismiss();
+            _overlay?.ReleaseSoon();
             _swapInProgress = false;
             _suppressRefresh = false;
             Refresh();
@@ -649,9 +656,7 @@ public partial class StripWindow : Window
                 return;
             }
 
-            _overlay ??= new SwapOverlay();
-            _overlay.EnsureVisible(_ws.GetPrimaryWorkArea());
-            await _overlay.PresentAsync(flights);
+            await Overlay().PresentAsync(flights, _ws.GetPrimaryWorkArea());
             shown = clock.ElapsedMilliseconds;
             _engine.CommitPark(swap);      // the real outgoing windows vanish underneath their pictures
             parked = clock.ElapsedMilliseconds;
@@ -670,6 +675,7 @@ public partial class StripWindow : Window
         finally
         {
             _overlay?.Dismiss();
+            _overlay?.ReleaseSoon();
             _swapInProgress = false;
             _stageLeavingStrip = null;
             Refresh();

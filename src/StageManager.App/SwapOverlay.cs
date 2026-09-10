@@ -12,9 +12,12 @@ using StageManager.Win32;
 namespace StageManager.App;
 
 /// <summary>
-/// A transparent, click-through window covering the work area on which window snapshots fly between the stage
-/// and the strip. The real windows are minimized and restored underneath it, so all the user sees is the pictures
-/// moving. It stays open (and empty) while Stage Manager is enabled so a swap does not pay for showing a window.
+/// A transparent, click-through window on which window snapshots fly between the stage and the strip. The real
+/// windows are minimized and restored underneath it, so all the user sees is the pictures moving.
+/// It is shown only around interactions: it comes up when the pointer reaches the strip or a window drag begins
+/// (so the first frame of a swap is not delayed by creating a window), covers just the area an animation needs,
+/// and hides again a moment after it was last used. A permanent full-screen layered window would keep DWM
+/// compositing an extra layer and defeat fullscreen optimisations of games and video players.
 /// </summary>
 internal sealed class SwapOverlay : Window
 {
@@ -22,9 +25,12 @@ internal sealed class SwapOverlay : Window
     public sealed record Flight(BitmapSource Image, RectPx From, RectPx To);
 
     private const double CornerRadiusDip = 8;
+    private const int AnimationMarginPx = 64; // room for the shadow and the spring's slight overshoot
+    private static readonly TimeSpan IdleHideDelay = TimeSpan.FromSeconds(2.5);
 
     private readonly Canvas _canvas = new();
     private readonly List<(FrameworkElement Element, Flight Flight)> _flights = new();
+    private readonly DispatcherTimer _hideTimer;
     private FrameworkElement? _ghost;
     private RectPx _area;
     private double _scale = 1;
@@ -41,6 +47,12 @@ internal sealed class SwapOverlay : Window
         Focusable = false;
         IsHitTestVisible = false;
         Content = _canvas;
+        _hideTimer = new DispatcherTimer(DispatcherPriority.Background) { Interval = IdleHideDelay };
+        _hideTimer.Tick += (_, _) =>
+        {
+            _hideTimer.Stop();
+            if (_canvas.Children.Count == 0 && IsVisible) Hide();
+        };
         new WindowInteropHelper(this).EnsureHandle();
     }
 
@@ -52,9 +64,10 @@ internal sealed class SwapOverlay : Window
         NativeWindow.MakeClickThrough(handle);
     }
 
-    /// <summary>Makes sure the (empty) overlay covers <paramref name="area"/> and is showing.</summary>
+    /// <summary>Makes sure the (empty) overlay covers <paramref name="area"/> and is showing; cancels a pending hide.</summary>
     public void EnsureVisible(RectPx area)
     {
+        _hideTimer.Stop();
         _area = area;
         _scale = VisualTreeHelper.GetDpi(this).DpiScaleX;
         Left = area.Left / _scale;
@@ -64,10 +77,27 @@ internal sealed class SwapOverlay : Window
         if (!IsVisible) Show();
     }
 
-    /// <summary>Puts every flight at its start rectangle; completes once that frame is on screen.</summary>
-    public async Task PresentAsync(IReadOnlyList<Flight> flights)
+    /// <summary>Hides the overlay shortly, unless something uses it before then.</summary>
+    public void ReleaseSoon()
     {
-        EnsureVisible(_area);
+        _hideTimer.Stop();
+        _hideTimer.Start();
+    }
+
+    public void HideNow()
+    {
+        _hideTimer.Stop();
+        Dismiss();
+        if (IsVisible) Hide();
+    }
+
+    /// <summary>
+    /// Puts every flight at its start rectangle, sizing the overlay to what the flights will cover; completes once
+    /// that frame is on screen.
+    /// </summary>
+    public async Task PresentAsync(IReadOnlyList<Flight> flights, RectPx workArea)
+    {
+        EnsureVisible(BoundsOf(flights, workArea));
         _canvas.Children.Clear();
         _flights.Clear();
         _ghost = null;
@@ -84,6 +114,28 @@ internal sealed class SwapOverlay : Window
         // composition thread push the layered bitmap to the screen before anything underneath changes.
         await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Loaded);
         await Task.Delay(16);
+    }
+
+    /// <summary>The smallest rectangle the animation needs: every start and end rectangle plus a margin, within the work area.</summary>
+    private static RectPx BoundsOf(IReadOnlyList<Flight> flights, RectPx workArea)
+    {
+        if (flights.Count == 0) return workArea;
+        int left = int.MaxValue, top = int.MaxValue, right = int.MinValue, bottom = int.MinValue;
+        foreach (var flight in flights)
+        {
+            foreach (var r in new[] { flight.From, flight.To })
+            {
+                left = Math.Min(left, r.Left);
+                top = Math.Min(top, r.Top);
+                right = Math.Max(right, r.Right);
+                bottom = Math.Max(bottom, r.Bottom);
+            }
+        }
+        return new RectPx(
+            Math.Max(workArea.Left, left - AnimationMarginPx),
+            Math.Max(workArea.Top, top - AnimationMarginPx),
+            Math.Min(workArea.Right, right + AnimationMarginPx),
+            Math.Min(workArea.Bottom, bottom + AnimationMarginPx));
     }
 
     /// <summary>Moves every flight to its target rectangle along a spring curve.</summary>
@@ -111,7 +163,7 @@ internal sealed class SwapOverlay : Window
         return Task.WhenAny(done.Task, Task.Delay(duration + TimeSpan.FromMilliseconds(500)));
     }
 
-    /// <summary>Removes the pictures; the overlay stays open and invisible.</summary>
+    /// <summary>Removes the pictures; the overlay stays open until <see cref="ReleaseSoon"/> or <see cref="HideNow"/>.</summary>
     public void Dismiss()
     {
         _canvas.Children.Clear();
@@ -122,9 +174,9 @@ internal sealed class SwapOverlay : Window
     // ---------------------------------------------------------------- drag ghost
 
     /// <summary>Shows a picture that follows the pointer while a card is being dragged out of the strip.</summary>
-    public void ShowGhost(BitmapSource image, RectPx rect)
+    public void ShowGhost(BitmapSource image, RectPx rect, RectPx workArea)
     {
-        EnsureVisible(_area);
+        EnsureVisible(workArea); // the ghost can go anywhere
         HideGhost();
         _ghost = MakePicture(image, opacity: 0.94);
         Place(_ghost, rect);

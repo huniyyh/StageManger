@@ -305,9 +305,12 @@ public partial class StripWindow : Window
     {
         if (_thumbnails.TryGetValue(id, out var cached) && ReferenceEquals(cached.Snapshot, snapshot))
             return cached.Bitmap;
+        if (snapshot.Bgra == null)
+            return cached.Bitmap ?? BitmapSource.Create(1, 1, 96, 96, PixelFormats.Bgr32, null, new byte[4], 4); // pixels already handed over
 
         var bitmap = BitmapSource.Create(snapshot.Width, snapshot.Height, 96, 96, PixelFormats.Bgr32, null, snapshot.Bgra, snapshot.Stride);
         bitmap.Freeze();
+        snapshot.ReleasePixels(); // the bitmap now owns the only copy
         _thumbnails[id] = (snapshot, bitmap);
         return bitmap;
     }
@@ -318,18 +321,22 @@ public partial class StripWindow : Window
         if (_icons.TryGetValue(executablePath, out var cached)) return cached;
 
         BitmapSource? result = null;
-        try
+        nint icon = NotificationIcon.ExtractFileIcon(executablePath);
+        if (icon != 0)
         {
-            using var icon = System.Drawing.Icon.ExtractAssociatedIcon(executablePath);
-            if (icon != null)
+            try
             {
-                result = Imaging.CreateBitmapSourceFromHIcon(icon.Handle, Int32Rect.Empty, BitmapSizeOptions.FromEmptyOptions());
+                result = Imaging.CreateBitmapSourceFromHIcon(icon, Int32Rect.Empty, BitmapSizeOptions.FromEmptyOptions());
                 result.Freeze();
             }
-        }
-        catch (Exception ex)
-        {
-            Log.Write($"icon extraction failed for {executablePath}: {ex.Message}");
+            catch (Exception ex)
+            {
+                Log.Write($"icon conversion failed for {executablePath}: {ex.Message}");
+            }
+            finally
+            {
+                NotificationIcon.DestroyIcon(icon);
+            }
         }
         _icons[executablePath] = result;
         return result;

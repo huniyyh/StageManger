@@ -74,7 +74,7 @@ static int Snap(Win32WindowSystem ws, string target, string outputPath)
     var snapshot = ws.CaptureSnapshot(id, StageEngine.SnapshotMaxWidth, StageEngine.SnapshotMaxHeight);
     if (snapshot == null) { Console.WriteLine("capture failed"); return 1; }
 
-    var bitmap = BitmapSource.Create(snapshot.Width, snapshot.Height, 96, 96, PixelFormats.Bgr32, null, snapshot.Bgra, snapshot.Stride);
+    var bitmap = BitmapSource.Create(snapshot.Width, snapshot.Height, 96, 96, PixelFormats.Bgr32, null, snapshot.Bgra!, snapshot.Stride);
     var encoder = new PngBitmapEncoder();
     encoder.Frames.Add(BitmapFrame.Create(bitmap));
     using (var file = File.Create(outputPath)) encoder.Save(file);

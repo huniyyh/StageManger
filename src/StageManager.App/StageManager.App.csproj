@@ -6,7 +6,6 @@
     <RootNamespace>StageManager.App</RootNamespace>
     <AssemblyName>StageManager</AssemblyName>
     <UseWPF>true</UseWPF>
-    <UseWindowsForms>true</UseWindowsForms>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\stagemanager.ico</ApplicationIcon>
     <!-- Program.Main runs Velopack's hooks before WPF starts. -->
@@ -16,12 +15,6 @@
     <Product>Stage Manager</Product>
     <Authors>huniyyh</Authors>
   </PropertyGroup>
-
-  <ItemGroup>
-    <!-- WinForms is only used for the tray icon; keep its namespaces out of every other file. -->
-    <Using Remove="System.Windows.Forms" />
-    <Using Remove="System.Drawing" />
-  </ItemGroup>
 
   <ItemGroup>
     <!-- Where the app looks for new releases: the GitHub repository whose Releases the workflow publishes to. -->

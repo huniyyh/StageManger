@@ -1,129 +1,110 @@
-using System.Windows.Forms;
+using StageManager.Win32;
 
 namespace StageManager.App;
 
-/// <summary>Notification-area icon with the toggle, update and exit commands.</summary>
+/// <summary>Notification-area icon with the toggle, startup, update and exit commands. Built on Shell_NotifyIcon, not WinForms.</summary>
 internal sealed class TrayIcon : IDisposable
 {
-    private const string EnableText = "Stage Manager 켜기  (Ctrl+Alt+S)";
-    private const string DisableText = "Stage Manager 끄기  (Ctrl+Alt+S)";
+    private const int IdToggle = 1;
+    private const int IdRunAtLogon = 2;
+    private const int IdStartEnabled = 3;
+    private const int IdCheckUpdates = 4;
+    private const int IdApplyUpdate = 5;
+    private const int IdQuit = 6;
 
-    private readonly NotifyIcon _icon;
-    private readonly ToolStripMenuItem _toggle;
-    private readonly ToolStripMenuItem _applyUpdate;
-    private readonly ToolStripMenuItem _runAtLogon;
-    private readonly ToolStripMenuItem _startEnabled;
-    private readonly Action _toggleAction;
-    private Action? _applyUpdateAction;
+    private readonly NotificationIcon _icon;
+    private readonly nint _iconHandle;
+    private readonly Action _toggle;
+    private readonly Action _checkUpdates;
+    private readonly Action _exit;
+    private Action? _applyUpdate;
+    private string? _readyVersion;
+    private bool _enabled;
     private DateTime _lastClickToggle = DateTime.MinValue;
 
-    public TrayIcon(Action toggle, Action checkUpdates, Action exit)
+    public TrayIcon(AppMessageWindow window, Action toggle, Action checkUpdates, Action exit)
     {
-        _toggleAction = toggle;
-        var menu = new ContextMenuStrip();
-        _toggle = new ToolStripMenuItem(EnableText);
-        _toggle.Click += (_, _) => toggle();
+        _toggle = toggle;
+        _checkUpdates = checkUpdates;
+        _exit = exit;
+        _iconHandle = NotificationIcon.ExtractFileIcon(Environment.ProcessPath ?? "");
+        _icon = new NotificationIcon(window.Handle, _iconHandle != 0 ? _iconHandle : NotificationIcon.DefaultApplicationIcon(), "Stage Manager (꺼짐)");
+        window.TrayInteraction += OnInteraction;
+        window.TaskbarCreated += () => _icon.Add(); // Explorer restarted; the icon has to be registered again
+    }
 
-        _runAtLogon = new ToolStripMenuItem("Windows 시작 시 실행") { CheckOnClick = true };
-        _startEnabled = new ToolStripMenuItem("시작 시 바로 켜기") { CheckOnClick = true };
-        _runAtLogon.CheckedChanged += (_, _) => OnStartupChoiceChanged();
-        _startEnabled.CheckedChanged += (_, _) => OnStartupChoiceChanged();
-        menu.Opening += (_, _) => RefreshStartupChoice(); // reflect changes made in Settings or by the uninstaller
-
-        var check = new ToolStripMenuItem("업데이트 확인");
-        check.Click += (_, _) => checkUpdates();
-        _applyUpdate = new ToolStripMenuItem("업데이트 적용 (재시작)") { Visible = false };
-        _applyUpdate.Click += (_, _) => _applyUpdateAction?.Invoke();
-        var quit = new ToolStripMenuItem("종료");
-        quit.Click += (_, _) => exit();
-        menu.Items.Add(_toggle);
-        menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(_runAtLogon);
-        menu.Items.Add(_startEnabled);
-        menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(check);
-        menu.Items.Add(_applyUpdate);
-        menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(quit);
-        RefreshStartupChoice();
-
-        _icon = new NotifyIcon
+    private void OnInteraction(TrayEvent interaction)
+    {
+        switch (interaction)
         {
-            Icon = LoadIcon(),
-            Text = "Stage Manager (꺼짐)",
-            Visible = true,
-            ContextMenuStrip = menu,
+            case TrayEvent.LeftClick:
+            case TrayEvent.LeftDoubleClick:
+                ToggleOnce();
+                break;
+            case TrayEvent.ContextMenu:
+                ShowMenu();
+                break;
+            case TrayEvent.BalloonClicked:
+                _applyUpdate?.Invoke();
+                break;
+        }
+    }
+
+    private void ShowMenu()
+    {
+        var (runAtLogon, startEnabled) = StartupRegistration.Read();
+        var entries = new List<TrayMenuEntry>
+        {
+            new(IdToggle, _enabled ? "Stage Manager 끄기\tCtrl+Alt+S" : "Stage Manager 켜기\tCtrl+Alt+S"),
+            TrayMenuEntry.Separator,
+            new(IdRunAtLogon, "Windows 시작 시 실행", Checked: runAtLogon),
+            new(IdStartEnabled, "시작 시 바로 켜기", Checked: startEnabled, Enabled: runAtLogon),
+            TrayMenuEntry.Separator,
+            new(IdCheckUpdates, "업데이트 확인"),
         };
-        _icon.MouseClick += (_, e) => { if (e.Button == MouseButtons.Left) ToggleOnce(); };
-        _icon.MouseDoubleClick += (_, e) => { if (e.Button == MouseButtons.Left) ToggleOnce(); };
-        _icon.BalloonTipClicked += (_, _) => _applyUpdateAction?.Invoke();
+        if (_readyVersion != null) entries.Add(new TrayMenuEntry(IdApplyUpdate, $"v{_readyVersion} 로 업데이트 (재시작)"));
+        entries.Add(TrayMenuEntry.Separator);
+        entries.Add(new TrayMenuEntry(IdQuit, "종료"));
+
+        switch (_icon.ShowMenu(entries))
+        {
+            case IdToggle: _toggle(); break;
+            case IdRunAtLogon: StartupRegistration.Write(!runAtLogon, !runAtLogon && startEnabled); break;
+            case IdStartEnabled: StartupRegistration.Write(true, !startEnabled); break;
+            case IdCheckUpdates: _checkUpdates(); break;
+            case IdApplyUpdate: _applyUpdate?.Invoke(); break;
+            case IdQuit: _exit(); break;
+        }
     }
 
     public void Update(bool enabled)
     {
-        _toggle.Text = enabled ? DisableText : EnableText;
-        _icon.Text = enabled ? "Stage Manager (켜짐)" : "Stage Manager (꺼짐)";
+        _enabled = enabled;
+        _icon.SetTip(enabled ? "Stage Manager (켜짐)" : "Stage Manager (꺼짐)");
     }
 
-    public void ShowBalloon(string title, string text)
-        => _icon.ShowBalloonTip(3000, title, text, ToolTipIcon.Info);
+    public void ShowBalloon(string title, string text) => _icon.ShowBalloon(title, text, 3000);
 
-    private bool _refreshingStartupChoice;
-
-    private void RefreshStartupChoice()
-    {
-        var (runAtLogon, startEnabled) = StartupRegistration.Read();
-        _refreshingStartupChoice = true;
-        try
-        {
-            _runAtLogon.Checked = runAtLogon;
-            _startEnabled.Checked = startEnabled;
-            _startEnabled.Enabled = runAtLogon;
-        }
-        finally { _refreshingStartupChoice = false; }
-    }
-
-    private void OnStartupChoiceChanged()
-    {
-        if (_refreshingStartupChoice) return;
-        StartupRegistration.Write(_runAtLogon.Checked, _runAtLogon.Checked && _startEnabled.Checked);
-        RefreshStartupChoice();
-    }
-
-    /// <summary>Offers a downloaded update: a menu item appears and a balloon that applies it when clicked.</summary>
+    /// <summary>Offers a downloaded update: a menu entry appears and a balloon that applies it when clicked.</summary>
     public void ShowUpdateReady(string version, Action apply)
     {
-        _applyUpdateAction = apply;
-        _applyUpdate.Text = $"v{version} 로 업데이트 (재시작)";
-        _applyUpdate.Visible = true;
-        _icon.ShowBalloonTip(8000, "Stage Manager 업데이트", $"v{version} 이 준비됐습니다. 클릭하면 재시작해서 적용합니다.", ToolTipIcon.Info);
-    }
-
-    private static System.Drawing.Icon LoadIcon()
-    {
-        try
-        {
-            if (Environment.ProcessPath is { } exe && System.Drawing.Icon.ExtractAssociatedIcon(exe) is { } own) return own;
-        }
-        catch (Exception ex)
-        {
-            Log.Write("app icon unavailable: " + ex.Message);
-        }
-        return System.Drawing.SystemIcons.Application;
+        _readyVersion = version;
+        _applyUpdate = apply;
+        _icon.ShowBalloon("Stage Manager 업데이트", $"v{version} 이 준비됐습니다. 클릭하면 재시작해서 적용합니다.", 8000);
     }
 
     /// <summary>A double-click, or any burst of clicks inside the system double-click interval, toggles exactly once.</summary>
     private void ToggleOnce()
     {
         var now = DateTime.UtcNow;
-        if ((now - _lastClickToggle).TotalMilliseconds < SystemInformation.DoubleClickTime) return;
+        if ((now - _lastClickToggle).TotalMilliseconds < NotificationIcon.DoubleClickTime) return;
         _lastClickToggle = now;
-        _toggleAction();
+        _toggle();
     }
 
     public void Dispose()
     {
-        _icon.Visible = false;
         _icon.Dispose();
+        NotificationIcon.DestroyIcon(_iconHandle);
     }
 }

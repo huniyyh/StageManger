@@ -10,7 +10,7 @@ macOS Stage Manager 를 Windows 11 에서 재현하는 프로젝트입니다. C#
 | 프로젝트 | 역할 |
 |---|---|
 | `src/StageManager.Core` | 순수 C#. 창 모델, Alt-Tab 규칙의 창 필터, 레이아웃 계산, 스테이지 상태 머신(`StageEngine`). Win32 의존 없음 |
-| `src/StageManager.Win32` | `IWindowSystem` 의 Win32 구현. CsWin32 로 생성한 바인딩, WinEvent 훅, PrintWindow 스냅샷 |
+| `src/StageManager.Win32` | `IWindowSystem` 의 Win32 구현. CsWin32 로 생성한 바인딩, WinEvent 훅, PrintWindow 스냅샷, Shell_NotifyIcon 트레이 아이콘 |
 | `src/StageManager.App` | WPF 트레이 앱. 스트립 창, 전역 단축키, 크래시 복구 |
 | `src/StageManager.Cli` | 진단 도구 `stagectl`. 창을 건드리지 않고 필터, 이벤트, 스냅샷, 계획을 확인 |
 | `tests/StageManager.Core.Tests` | 가짜 창 시스템으로 엔진을 검증하는 xunit 테스트 |
@@ -71,6 +71,7 @@ stagectl plan            # 켰을 때 무엇을 할지 dry run (창을 건드리
 - 움직임은 감쇠 스프링 곡선(`SpringEase`, 360ms)을 따르고, 날아가는 그림은 둥근 모서리와 그림자를 가진 창처럼 그려집니다. 스트립 카드는 다시 만들지 않고 유지되므로 자리가 바뀌면 미끄러지고, 새 카드는 서서히 나타나며, 호버하면 살짝 커집니다. 카드를 중앙에 드롭할 때는 `PlanMerge` 로 미리 계산한 자리까지 그림이 커진 뒤 실제 창이 그 아래에 나타납니다.
 - 마우스가 스트립에 들어오면 나갈 창의 그림을 워커 스레드에서 미리 찍어 두고, 스왑은 진행 중인 캡처를 잠깐 기다렸다가 그 그림을 재사용합니다. 캡처는 PrintWindow 만 쓰고(DWM 아래에서는 화면 복사보다 빠릅니다), 캡처용 DIB 와 DC 는 재사용하며, 축소는 GDI 하프톤 `StretchBlt` 로 처리합니다. `stagectl bench` 로 캡처 비용과 훅 부하를 잴 수 있습니다.
 - 가상 머신이나 원격 세션처럼 GPU 가속이 없는 환경은 어댑터 이름과 WPF 렌더링 티어로 감지해 그림자 효과를 끕니다. `STAGEMANAGER_NO_EFFECTS=1` 로 강제할 수 있습니다.
+- 트레이 아이콘, 메뉴, 풍선은 WinForms 없이 Shell_NotifyIcon 을 직접 써서 WinForms 와 System.Drawing 을 로드하지 않습니다. 썸네일 픽셀은 WPF 비트맵으로 바뀐 뒤 원본 배열을 놓아 창당 한 벌만 유지합니다.
 - 활성 스테이지의 창이 최대화되거나 스트립 영역 위로 옮겨지면 스트립이 화면 가장자리 밖으로 미끄러져 숨습니다. 오른쪽 가장자리에 포인터를 잠시 대면 다시 나타나고, 벗어나면 숨습니다. 창을 스트립으로 끌고 갈 때도 나타납니다. 창의 위치와 상태 변화는 `EVENT_OBJECT_LOCATIONCHANGE` 로 받되 틱 단위로 모아서 처리합니다.
 - 드래그 앤 드롭은 macOS 와 같이 양방향입니다. 카드를 스트립 밖으로 끌어 놓으면 그 스테이지가 활성 스테이지에 합류하고 놓은 지점에 창이 놓입니다(`MergeIntoActive`). Shift 클릭도 같은 동작입니다. 반대로 활성 창을 제목 표시줄로 끌어 스트립에 놓으면 그 창만 분리되어 스트립의 독립 항목이 되고(`CommitDetach`), 다시 꺼내면 드래그를 시작했던 자리로 돌아갑니다. 창을 끌고 있는 동안 스트립이 밝아져 드롭 위치를 알려 줍니다.
 - 스트립은 절대 활성화되지 않아 마우스 캡처를 쓸 수 없으므로, 카드 드래그는 타이머로 포인터와 버튼 상태를 직접 읽어 추적합니다.

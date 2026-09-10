@@ -67,3 +67,22 @@ WINDOW_LONG_PTR_INDEX
 SET_WINDOW_POS_FLAGS
 SHOW_WINDOW_CMD
 HOT_KEY_MODIFIERS
+
+// Notification area icon and its menu (no WinForms)
+Shell_NotifyIcon
+CreatePopupMenu
+AppendMenu
+TrackPopupMenuEx
+DestroyMenu
+RegisterWindowMessage
+LoadIcon
+DestroyIcon
+SHGetFileInfo
+GetDoubleClickTime
+FindWindow
+NOTIFY_ICON_MESSAGE
+NOTIFY_ICON_DATA_FLAGS
+NOTIFY_ICON_INFOTIP_FLAGS
+TRACK_POPUP_MENU_FLAGS
+MENU_ITEM_FLAGS
+SHGFI_FLAGS

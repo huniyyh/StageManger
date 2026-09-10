@@ -11,7 +11,7 @@ public partial class App : System.Windows.Application
     private StageEngine? _engine;
     private StripWindow? _strip;
     private TrayIcon? _tray;
-    private HotkeyHost? _hotkey;
+    private AppMessageWindow? _messages;
     private DispatcherTimer? _tick;
     private DispatcherTimer? _updateTimer;
     private ParkedWindowStore? _store;
@@ -33,8 +33,8 @@ public partial class App : System.Windows.Application
         if (!createdNew)
         {
             // Hand the request over to the running instance and leave quietly.
-            nint running = NativeWindow.FindMessageOnlyWindow(HotkeyHost.WindowTitle);
-            if (running != 0) NativeWindow.PostMessage(running, HotkeyHost.WM_ANOTHER_INSTANCE, e.Args.Contains("--enable") ? 1 : 0);
+            nint running = NativeWindow.FindTopLevelWindow(AppMessageWindow.WindowTitle);
+            if (running != 0) NativeWindow.PostMessage(running, AppMessageWindow.WM_ANOTHER_INSTANCE, e.Args.Contains("--enable") ? 1 : 0);
             Log.Write("another instance is already running; exiting");
             _singleInstance.Dispose();
             _singleInstance = null;
@@ -68,10 +68,10 @@ public partial class App : System.Windows.Application
         _tick = new DispatcherTimer(TimeSpan.FromMilliseconds(150), DispatcherPriority.Background, (_, _) => _engine.Tick(), Dispatcher);
         _tick.Start();
 
-        _hotkey = new HotkeyHost();
-        _hotkey.Pressed += Toggle;
-        _hotkey.AnotherInstanceStarted += OnAnotherInstanceStarted;
-        _tray = new TrayIcon(Toggle, () => _ = CheckForUpdatesAsync(interactive: true), Shutdown);
+        _messages = new AppMessageWindow();
+        _messages.HotkeyPressed += Toggle;
+        _messages.AnotherInstanceStarted += OnAnotherInstanceStarted;
+        _tray = new TrayIcon(_messages, Toggle, () => _ = CheckForUpdatesAsync(interactive: true), Shutdown);
 
         _updater = new Updater();
         _updater.UpdateReady += version => _tray?.ShowUpdateReady(version, ApplyUpdate);
@@ -181,7 +181,7 @@ public partial class App : System.Windows.Application
         SafeDisable();
         _tick?.Stop();
         _updateTimer?.Stop();
-        _hotkey?.Dispose();
+        _messages?.Dispose();
         _tray?.Dispose();
         _ws?.Dispose();
         if (_singleInstance != null)

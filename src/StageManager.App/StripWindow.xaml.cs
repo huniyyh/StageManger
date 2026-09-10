@@ -108,6 +108,7 @@ public partial class StripWindow : Window
             Hide();
             _overlay?.HideNow();
             Items.Clear();
+            _thumbnails.Clear(); // the engine forgot every window, so their pictures go too
             _peekTimer.Stop();
             _peeking = false;
             _slidOut = false;
@@ -139,6 +140,7 @@ public partial class StripWindow : Window
                 Populate(item);
             }
         });
+        PruneThumbnails();
         if (!IsVisible) Show();
         UpdateCoverage();
     }
@@ -310,6 +312,16 @@ public partial class StripWindow : Window
         snapshot.ReleasePixels(); // the bitmap now owns the only copy
         _thumbnails[id] = (snapshot, bitmap);
         return bitmap;
+    }
+
+    /// <summary>
+    /// Drops the pictures of windows the engine no longer tracks. Each is up to a couple of megabytes, and without
+    /// this every window ever closed would keep one alive for the life of the process.
+    /// </summary>
+    private void PruneThumbnails()
+    {
+        foreach (var id in _thumbnails.Keys.Where(id => _engine.GetWindow(id) == null).ToList())
+            _thumbnails.Remove(id);
     }
 
     private BitmapSource? GetIcon(string? executablePath)
@@ -517,8 +529,9 @@ public partial class StripWindow : Window
         {
             var visible = lead.Snapshot.VisibleArea(lead.Bounds);
             var flights = new List<SwapOverlay.Flight> { new(GetThumbnail(lead.Id, lead.Snapshot), from.Value, visible) };
-            await Overlay().PresentAsync(flights, _ws.GetPrimaryWorkArea()); // replaces the ghost with the same picture in the same place
-            await _overlay.AnimateAsync(SwapDuration);
+            var overlay = Overlay();
+            await overlay.PresentAsync(flights, _ws.GetPrimaryWorkArea()); // replaces the ghost with the same picture in the same place
+            await overlay.AnimateAsync(SwapDuration);
             _engine.MergeIntoActive(stage, anchor, suppressTransitions: true); // the real windows appear underneath the picture
             _suppressRefresh = false;
             Refresh();
@@ -587,9 +600,10 @@ public partial class StripWindow : Window
                 new(GetThumbnail(id, picture.Snapshot), visible, FitInto(visible, topSlot)),
             };
 
-            await Overlay().PresentAsync(flights, _ws.GetPrimaryWorkArea());
+            var overlay = Overlay();
+            await overlay.PresentAsync(flights, _ws.GetPrimaryWorkArea());
             _engine.CommitDetach(id, suppressTransitions: true); // the real window vanishes underneath its picture
-            await _overlay.AnimateAsync(SwapDuration);
+            await overlay.AnimateAsync(SwapDuration);
             _suppressRefresh = false;
             Refresh(); // the new card fades in underneath the picture
             await Task.Delay(RevealDelay);
@@ -656,11 +670,12 @@ public partial class StripWindow : Window
                 return;
             }
 
-            await Overlay().PresentAsync(flights, _ws.GetPrimaryWorkArea());
+            var overlay = Overlay();
+            await overlay.PresentAsync(flights, _ws.GetPrimaryWorkArea());
             shown = clock.ElapsedMilliseconds;
             _engine.CommitPark(swap);      // the real outgoing windows vanish underneath their pictures
             parked = clock.ElapsedMilliseconds;
-            await _overlay.AnimateAsync(SwapDuration);
+            await overlay.AnimateAsync(SwapDuration);
             animated = clock.ElapsedMilliseconds;
             _engine.CommitPresent(swap);   // the real incoming windows appear underneath their pictures; the new card fades in
             presented = clock.ElapsedMilliseconds;

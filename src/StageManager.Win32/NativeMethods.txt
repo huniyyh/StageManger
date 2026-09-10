@@ -86,3 +86,6 @@ NOTIFY_ICON_INFOTIP_FLAGS
 TRACK_POPUP_MENU_FLAGS
 MENU_ITEM_FLAGS
 SHGFI_FLAGS
+
+// Display adapters (GPU detection without WMI)
+EnumDisplayDevices

@@ -12,12 +12,21 @@ internal sealed class ParkedWindowStore
 {
     private readonly string _path = Path.Combine(Log.Directory, "parked.json");
 
+    /// <summary>
+    /// What the file holds right now, or null when there is no file. The engine raises Changed for title changes
+    /// and the like many times a minute; only a different set of parked windows is worth a write.
+    /// </summary>
+    private string? _written;
+
     public void Save(IReadOnlyList<WindowId> parked)
     {
         try
         {
             if (parked.Count == 0) { Clear(); return; }
-            File.WriteAllText(_path, JsonSerializer.Serialize(parked.Select(p => (long)p.Value).ToArray()));
+            var json = JsonSerializer.Serialize(parked.Select(p => (long)p.Value).Order().ToArray());
+            if (json == _written) return;
+            File.WriteAllText(_path, json);
+            _written = json;
         }
         catch (Exception ex)
         {
@@ -27,6 +36,7 @@ internal sealed class ParkedWindowStore
 
     public void Clear()
     {
+        _written = null;
         try { if (File.Exists(_path)) File.Delete(_path); }
         catch { /* best effort */ }
     }

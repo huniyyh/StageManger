@@ -1,12 +1,12 @@
-using System.Management;
 using System.Windows.Media;
+using StageManager.Win32;
 
 namespace StageManager.App;
 
 /// <summary>
 /// What the machine can render comfortably. Virtual machines and remote sessions often have no GPU, yet WPF may
-/// still report a hardware tier there (a software Direct3D device answers the capability query), so the adapter
-/// name is checked as well. STAGEMANAGER_NO_EFFECTS=1 forces the lean path.
+/// still report a hardware tier there (a software Direct3D device answers the capability query), so the names of
+/// the adapters driving the desktop are checked as well. STAGEMANAGER_NO_EFFECTS=1 forces the lean path.
 /// </summary>
 internal static class Visuals
 {
@@ -32,19 +32,15 @@ internal static class Visuals
         Description = $"render tier {tier}, adapters [{adapters}]{(forced ? ", effects forced off" : "")} -> {(SoftwareRendering ? "software" : "hardware")}";
     }
 
-    private static IEnumerable<string> AdapterNames()
+    private static IReadOnlyList<string> AdapterNames()
     {
-        var names = new List<string>();
         try
         {
-            using var searcher = new ManagementObjectSearcher("SELECT Name FROM Win32_VideoController");
-            foreach (var adapter in searcher.Get())
-                if (adapter["Name"] is string name) names.Add(name);
+            return DisplayAdapters.Names();
         }
         catch (Exception ex)
         {
-            names.Add("unknown: " + ex.Message);
+            return new[] { "unknown: " + ex.Message };
         }
-        return names;
     }
 }

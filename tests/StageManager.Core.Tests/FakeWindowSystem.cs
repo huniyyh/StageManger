@@ -66,6 +66,9 @@ internal sealed class FakeWindowSystem : IWindowSystem
     public RectPx? GetRestoredBounds(WindowId id)
         => Windows.TryGetValue(id, out var w) ? (w.Minimized ? w.BoundsWhenRestored ?? w.Bounds : w.Bounds) : null;
 
+    public PointPx CursorPosition { get; set; } = new(960, 520);
+    public PointPx GetCursorPosition() => CursorPosition;
+
     public void SetTransitionsEnabled(WindowId id, bool enabled) => Ops.Add($"transitions {id.Value} {(enabled ? "on" : "off")}");
 
     public void Minimize(WindowId id) { Windows[id].Minimized = true; Ops.Add($"min {id.Value}"); }

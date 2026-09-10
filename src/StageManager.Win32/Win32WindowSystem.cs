@@ -24,6 +24,7 @@ public sealed unsafe class Win32WindowSystem : IWindowSystem, IDisposable
     private const uint WS_EX_NOACTIVATE = 0x08000000;
 
     private const uint EVENT_SYSTEM_FOREGROUND = 0x0003;
+    private const uint EVENT_SYSTEM_MOVESIZESTART = 0x000A;
     private const uint EVENT_SYSTEM_MOVESIZEEND = 0x000B;
     private const uint EVENT_SYSTEM_MINIMIZESTART = 0x0016;
     private const uint EVENT_SYSTEM_MINIMIZEEND = 0x0017;
@@ -79,6 +80,8 @@ public sealed unsafe class Win32WindowSystem : IWindowSystem, IDisposable
         if (PInvoke.GetMonitorInfo(monitor, ref mi)) return ToRect(mi.rcWork);
         return new RectPx(0, 0, 1920, 1080);
     }
+
+    public PointPx GetCursorPosition() => NativeWindow.GetCursorPosition();
 
     public RectPx? GetRestoredBounds(WindowId id)
     {
@@ -250,6 +253,7 @@ public sealed unsafe class Win32WindowSystem : IWindowSystem, IDisposable
             case EVENT_SYSTEM_FOREGROUND: kind = WindowEventKind.Foreground; break;
             case EVENT_SYSTEM_MINIMIZESTART: kind = WindowEventKind.MinimizeStarted; break;
             case EVENT_SYSTEM_MINIMIZEEND: kind = WindowEventKind.MinimizeEnded; break;
+            case EVENT_SYSTEM_MOVESIZESTART: kind = WindowEventKind.MoveSizeStarted; break;
             case EVENT_SYSTEM_MOVESIZEEND: kind = WindowEventKind.MoveSizeEnded; break;
             case EVENT_OBJECT_SHOW: kind = WindowEventKind.Shown; break;
             case EVENT_OBJECT_HIDE: kind = WindowEventKind.Hidden; break;

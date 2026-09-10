@@ -1,3 +1,4 @@
+using StageManager.Core;
 using Windows.Win32;
 using Windows.Win32.Foundation;
 using Windows.Win32.UI.Input.KeyboardAndMouse;
@@ -33,6 +34,30 @@ public static class NativeWindow
     public static void RaiseTopmost(nint hwnd)
         => PInvoke.SetWindowPos(new HWND(hwnd), HWND_TOPMOST, 0, 0, 0, 0,
             SET_WINDOW_POS_FLAGS.SWP_NOMOVE | SET_WINDOW_POS_FLAGS.SWP_NOSIZE | SET_WINDOW_POS_FLAGS.SWP_NOACTIVATE);
+
+    /// <summary>The pointer position in physical pixels.</summary>
+    public static PointPx GetCursorPosition()
+    {
+        PInvoke.GetCursorPos(out System.Drawing.Point p);
+        return new PointPx(p.X, p.Y);
+    }
+
+    /// <summary>
+    /// Whether the primary mouse button is down right now, straight from the input system. Needed because a
+    /// window that never activates cannot capture the mouse and so stops hearing about it once the pointer leaves.
+    /// </summary>
+    public static bool IsLeftButtonDown()
+    {
+        const int VK_LBUTTON = 0x01;
+        return (PInvoke.GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+    }
+
+    /// <summary>Whether Shift is held, straight from the input system (a never-activated window has no keyboard focus).</summary>
+    public static bool IsShiftDown()
+    {
+        const int VK_SHIFT = 0x10;
+        return (PInvoke.GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+    }
 
     public static bool RegisterHotKey(nint hwnd, int id, bool ctrl, bool alt, bool shift, bool win, uint virtualKey)
     {

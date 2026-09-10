@@ -112,6 +112,36 @@ internal sealed class SwapOverlay : Window
     {
         _canvas.Children.Clear();
         _flights.Clear();
+        _ghost = null;
+    }
+
+    // ---------------------------------------------------------------- drag ghost
+
+    private Image? _ghost;
+
+    /// <summary>Shows a picture that follows the pointer while a card is being dragged out of the strip.</summary>
+    public void ShowGhost(BitmapSource image, RectPx rect)
+    {
+        EnsureVisible(_area);
+        HideGhost();
+        _ghost = new Image { Source = image, Stretch = Stretch.Fill, Opacity = 0.92 };
+        _ghost.Effect = new System.Windows.Media.Effects.DropShadowEffect { BlurRadius = 18, ShadowDepth = 4, Opacity = 0.5 };
+        RenderOptions.SetBitmapScalingMode(_ghost, BitmapScalingMode.Linear);
+        Place(_ghost, rect);
+        _canvas.Children.Add(_ghost);
+        NativeWindow.RaiseTopmost(new WindowInteropHelper(this).Handle);
+    }
+
+    public void MoveGhost(RectPx rect)
+    {
+        if (_ghost != null) Place(_ghost, rect);
+    }
+
+    public void HideGhost()
+    {
+        if (_ghost == null) return;
+        _canvas.Children.Remove(_ghost);
+        _ghost = null;
     }
 
     private static DoubleAnimation Animate(Image target, DependencyProperty property, double to, TimeSpan duration, IEasingFunction easing)

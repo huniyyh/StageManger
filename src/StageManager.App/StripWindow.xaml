@@ -9,7 +9,7 @@
     <Window.Resources>
         <DataTemplate DataType="{x:Type local:StageItem}">
             <Border x:Name="Card" Margin="12,6" Padding="8" CornerRadius="10" Background="#00FFFFFF" Cursor="Hand"
-                    MouseLeftButtonUp="OnCardClicked">
+                    MouseLeftButtonDown="OnCardPressed">
                 <StackPanel>
                     <Grid>
                         <Border x:Name="ThumbBox" CornerRadius="6" Background="#66202020" MinHeight="72" ClipToBounds="True">
@@ -48,7 +48,12 @@
             </DataTemplate.Triggers>
         </DataTemplate>
     </Window.Resources>
-    <ScrollViewer VerticalScrollBarVisibility="Hidden" HorizontalScrollBarVisibility="Disabled">
-        <ItemsControl x:Name="Cards" ItemsSource="{Binding Items}" Margin="0,16" />
-    </ScrollViewer>
+    <Grid>
+        <!-- Lit up while the user drags a window over the strip: "drop it here to send it to the strip". -->
+        <Border x:Name="DropHighlight" Margin="6,10" CornerRadius="14" Background="#26FFFFFF"
+                BorderBrush="#99FFFFFF" BorderThickness="2" Visibility="Collapsed" IsHitTestVisible="False" />
+        <ScrollViewer VerticalScrollBarVisibility="Hidden" HorizontalScrollBarVisibility="Disabled">
+            <ItemsControl x:Name="Cards" ItemsSource="{Binding Items}" Margin="0,16" />
+        </ScrollViewer>
+    </Grid>
 </Window>

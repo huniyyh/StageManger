@@ -5,6 +5,7 @@ using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using System.Windows.Threading;
 using StageManager.Core;
 using StageManager.Win32;
 
@@ -15,6 +16,7 @@ public partial class StripWindow : Window
 {
     private const double StripWidthDip = 200;
     private const double MarginDip = 12;
+    private const int DragThresholdPx = 6;
     private static readonly TimeSpan SwapDuration = TimeSpan.FromMilliseconds(280);
     private static readonly TimeSpan RevealDelay = TimeSpan.FromMilliseconds(90);
 
@@ -22,9 +24,13 @@ public partial class StripWindow : Window
     private readonly IWindowSystem _ws;
     private readonly Dictionary<WindowId, (Snapshot Snapshot, BitmapSource Bitmap)> _thumbnails = new();
     private readonly Dictionary<string, BitmapSource?> _icons = new(StringComparer.OrdinalIgnoreCase);
+    private readonly DispatcherTimer _pressTimer;
+    private readonly DispatcherTimer _windowDragTimer;
     private bool _swapInProgress;
+    private bool _suppressRefresh;
     private Stage? _stageLeavingStrip;
     private SwapOverlay? _overlay;
+    private CardPress? _press;
 
     public ObservableCollection<StageItem> Items { get; } = new();
 
@@ -34,6 +40,13 @@ public partial class StripWindow : Window
         _ws = ws;
         InitializeComponent();
         DataContext = this;
+
+        _pressTimer = new DispatcherTimer(DispatcherPriority.Input) { Interval = TimeSpan.FromMilliseconds(15) };
+        _pressTimer.Tick += OnPressTick;
+        _windowDragTimer = new DispatcherTimer(DispatcherPriority.Input) { Interval = TimeSpan.FromMilliseconds(30) };
+        _windowDragTimer.Tick += OnWindowDragTick;
+        _engine.UserDragChanged += OnUserDragChanged;
+        _engine.DroppedOnStrip += OnWindowDroppedOnStrip;
 
         // Create the HWND now so the layout settings are correct before the engine is first enabled.
         new WindowInteropHelper(this).EnsureHandle();
@@ -65,6 +78,7 @@ public partial class StripWindow : Window
     /// <summary>Rebuilds the cards from the engine state and shows or hides the strip.</summary>
     public void Refresh()
     {
+        if (_suppressRefresh) return;
         if (!_engine.IsEnabled)
         {
             Hide();
@@ -88,13 +102,15 @@ public partial class StripWindow : Window
 
     private void PositionOnPrimaryMonitor()
     {
-        var area = StageLayout.StripArea(_ws.GetPrimaryWorkArea(), _engine.Layout);
+        var area = StripArea();
         double scale = VisualTreeHelper.GetDpi(this).DpiScaleX;
         Left = area.Left / scale;
         Top = area.Top / scale;
         Width = StripWidthDip;
         Height = area.Height / scale;
     }
+
+    private RectPx StripArea() => StageLayout.StripArea(_ws.GetPrimaryWorkArea(), _engine.Layout);
 
     private StageItem BuildItem(Stage stage)
     {
@@ -145,8 +161,6 @@ public partial class StripWindow : Window
         return result;
     }
 
-    // ---------------------------------------------------------------- swapping with animation
-
     // The pointer arriving over the strip usually means a click is coming: take the outgoing pictures now,
     // so the swap itself does not have to wait for a screen capture.
     protected override void OnMouseEnter(MouseEventArgs e)
@@ -161,12 +175,159 @@ public partial class StripWindow : Window
         if (!_swapInProgress) _engine.PrefetchActiveSnapshots(TimeSpan.FromSeconds(1));
     }
 
-    private async void OnCardClicked(object sender, MouseButtonEventArgs e)
+    // ---------------------------------------------------------------- pressing and dragging cards
+
+    /// <summary>A card the user is holding down: becomes a click on release, or a drag once the pointer moves.</summary>
+    private sealed class CardPress
     {
-        if (_swapInProgress) return;
-        if ((sender as FrameworkElement)?.DataContext is not StageItem item) return;
-        await SwapToAsync(item);
+        public required StageItem Item { get; init; }
+        public required FrameworkElement Card { get; init; }
+        public required PointPx Start { get; init; }
+        public required RectPx ThumbRect { get; init; }
+        public bool Dragging { get; set; }
     }
+
+    /// <summary>
+    /// The strip never activates, so it cannot capture the mouse and stops hearing about it once the pointer
+    /// leaves. Instead the press is followed with a timer that reads the pointer and button state directly.
+    /// </summary>
+    private void OnCardPressed(object sender, MouseButtonEventArgs e)
+    {
+        if (_swapInProgress || _press != null) return;
+        if (sender is not FrameworkElement card || card.DataContext is not StageItem item) return;
+        e.Handled = true;
+
+        if (NativeWindow.IsShiftDown())
+        {
+            // As on macOS: Shift-click adds the stage to the current one instead of swapping.
+            _engine.MergeIntoActive(item.Stage, anchor: null, suppressTransitions: true);
+            return;
+        }
+
+        var cursor = NativeWindow.GetCursorPosition();
+        _press = new CardPress
+        {
+            Item = item,
+            Card = card,
+            Start = cursor,
+            ThumbRect = ScreenRectOf(item) ?? RectPx.FromSize(cursor.X - 80, cursor.Y - 50, 160, 100),
+        };
+        _pressTimer.Start();
+    }
+
+    private void OnPressTick(object? sender, EventArgs e)
+    {
+        if (_press is not { } press)
+        {
+            _pressTimer.Stop();
+            return;
+        }
+
+        var cursor = NativeWindow.GetCursorPosition();
+        bool buttonDown = NativeWindow.IsLeftButtonDown();
+
+        if (!press.Dragging
+            && (Math.Abs(cursor.X - press.Start.X) > DragThresholdPx || Math.Abs(cursor.Y - press.Start.Y) > DragThresholdPx))
+        {
+            press.Dragging = true;
+            Log.Write($"card drag begins: {press.Item.Stage}");
+            press.Card.Opacity = 0.35;
+            if (press.Item.Thumbnail != null)
+            {
+                _overlay ??= new SwapOverlay();
+                _overlay.EnsureVisible(_ws.GetPrimaryWorkArea());
+                _overlay.ShowGhost(press.Item.Thumbnail, GhostRect(press, cursor));
+            }
+        }
+        if (press.Dragging) _overlay?.MoveGhost(GhostRect(press, cursor));
+        if (buttonDown) return;
+
+        // Released.
+        _pressTimer.Stop();
+        _press = null;
+        press.Card.Opacity = 1;
+        if (!press.Dragging)
+        {
+            _ = SwapToAsync(press.Item);
+            return;
+        }
+
+        _overlay?.HideGhost();
+        bool backOnStrip = StripArea().Contains(cursor);
+        Log.Write($"card dropped at {cursor}: {(backOnStrip ? "back on the strip, cancelled" : "merge " + press.Item.Stage)}");
+        if (backOnStrip) return;
+        _engine.MergeIntoActive(press.Item.Stage, cursor, suppressTransitions: true);
+    }
+
+    private static RectPx GhostRect(CardPress press, PointPx cursor)
+        => RectPx.FromSize(
+            press.ThumbRect.Left + (cursor.X - press.Start.X),
+            press.ThumbRect.Top + (cursor.Y - press.Start.Y),
+            press.ThumbRect.Width,
+            press.ThumbRect.Height);
+
+    // ---------------------------------------------------------------- windows dragged onto the strip
+
+    private void OnUserDragChanged(bool dragging)
+    {
+        if (dragging)
+        {
+            _windowDragTimer.Start();
+            return;
+        }
+        _windowDragTimer.Stop();
+        DropHighlight.Visibility = Visibility.Collapsed;
+    }
+
+    private void OnWindowDragTick(object? sender, EventArgs e)
+    {
+        bool over = StripArea().Contains(NativeWindow.GetCursorPosition());
+        DropHighlight.Visibility = over ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>The user dropped a stage window on the strip: its picture shrinks into the top slot while the window is parked.</summary>
+    private async void OnWindowDroppedOnStrip(WindowId id)
+    {
+        DropHighlight.Visibility = Visibility.Collapsed;
+        var picture = _engine.PrepareDetach(id);
+        if (picture?.Snapshot == null || _swapInProgress)
+        {
+            _engine.CommitDetach(id, suppressTransitions: picture != null);
+            return;
+        }
+
+        _swapInProgress = true;
+        _suppressRefresh = true;
+        try
+        {
+            var topSlot = (Items.Count > 0 ? ScreenRectOf(Items[0]) : null) ?? StripArea();
+            var visible = picture.Snapshot.VisibleArea(picture.Bounds);
+            var flights = new List<SwapOverlay.Flight>
+            {
+                new(GetThumbnail(id, picture.Snapshot), visible, FitInto(visible, topSlot)),
+            };
+
+            _overlay ??= new SwapOverlay();
+            _overlay.EnsureVisible(_ws.GetPrimaryWorkArea());
+            await _overlay.PresentAsync(flights);
+            _engine.CommitDetach(id, suppressTransitions: true); // the real window vanishes underneath its picture
+            await _overlay.AnimateAsync(SwapDuration);
+        }
+        catch (Exception ex)
+        {
+            Log.Write("detach animation failed: " + ex);
+            _engine.CommitDetach(id);
+        }
+        finally
+        {
+            _overlay?.Dismiss();
+            _swapInProgress = false;
+            _suppressRefresh = false;
+            Refresh();
+        }
+    }
+
+    // ---------------------------------------------------------------- swapping with animation
 
     /// <summary>
     /// Switches to the clicked stage. Pictures of the outgoing windows shrink into the top slot of the strip while the
@@ -174,6 +335,7 @@ public partial class StripWindow : Window
     /// </summary>
     private async Task SwapToAsync(StageItem item)
     {
+        if (_swapInProgress) return;
         var clock = System.Diagnostics.Stopwatch.StartNew();
         var swap = _engine.PrepareSwap(item.Stage, suppressTransitions: true);
         if (swap == null) return;
@@ -183,7 +345,7 @@ public partial class StripWindow : Window
         _stageLeavingStrip = item.Stage;
         try
         {
-            var stripArea = StageLayout.StripArea(_ws.GetPrimaryWorkArea(), _engine.Layout);
+            var stripArea = StripArea();
             var cardRect = ScreenRectOf(item) ?? stripArea;
             var topSlot = (Items.Count > 0 ? ScreenRectOf(Items[0]) : null) ?? cardRect;
             Items.Remove(item);

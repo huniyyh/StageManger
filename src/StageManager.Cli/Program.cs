@@ -129,6 +129,7 @@ sealed class DryRunWindowSystem : IWindowSystem
     public WindowId? GetForegroundWindow() => _real.GetForegroundWindow();
     public RectPx GetPrimaryWorkArea() => _real.GetPrimaryWorkArea();
     public RectPx? GetRestoredBounds(WindowId id) => _real.GetRestoredBounds(id);
+    public PointPx GetCursorPosition() => _real.GetCursorPosition();
     public void SetTransitionsEnabled(WindowId id, bool enabled) => Ops.Add($"transitions {Describe(id)} {(enabled ? "on" : "off")}");
     public void Minimize(WindowId id) { _pretendMinimized.Add(id); Ops.Add($"minimize {Describe(id)}"); }
     public void RestoreNoActivate(WindowId id) { _pretendMinimized.Remove(id); Ops.Add($"restore  {Describe(id)}"); }

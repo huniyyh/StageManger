@@ -15,6 +15,9 @@ public sealed class TrackedWindow
     /// <summary>Where the window lives while its stage is active.</summary>
     public RectPx? StageBounds { get; internal set; }
 
+    /// <summary>Where the window was when the user started dragging it; it returns there if the drag ends on the strip.</summary>
+    public RectPx? DragStartBounds { get; internal set; }
+
     /// <summary>True while the window is minimized because the engine parked it.</summary>
     public bool ParkedByUs { get; internal set; }
 

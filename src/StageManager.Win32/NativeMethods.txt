@@ -14,6 +14,8 @@ GetWindowRect
 GetWindowPlacement
 GetWindowThreadProcessId
 GetForegroundWindow
+GetCursorPos
+GetAsyncKeyState
 SetForegroundWindow
 SetWindowPos
 ShowWindow

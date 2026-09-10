@@ -17,6 +17,9 @@ public interface IWindowSystem
     /// <summary>The bounds a window will have once it is no longer minimized, or its current bounds when it is not minimized.</summary>
     RectPx? GetRestoredBounds(WindowId id);
 
+    /// <summary>The mouse pointer position in physical pixels.</summary>
+    PointPx GetCursorPosition();
+
     void Minimize(WindowId id);
     void RestoreNoActivate(WindowId id);
     void SetBounds(WindowId id, RectPx bounds);

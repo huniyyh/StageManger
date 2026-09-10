@@ -695,6 +695,197 @@ public class StageEngineTests
         Assert.Empty(ws.Ops);
     }
 
+    // ---------------------------------------------------------------- grouping by drag and drop
+
+    private static readonly PointPx OnStrip = new(1800, 300); // the strip covers x 1720..1920 by default
+
+    /// <summary>Simulates the user dragging a window of the active stage and releasing it with the pointer at <paramref name="cursor"/>.</summary>
+    private static void DragWindow(FakeWindowSystem ws, StageEngine engine, WindowId id, RectPx to, PointPx cursor)
+    {
+        engine.OnWindowEvent(new WindowEvent(WindowEventKind.MoveSizeStarted, id));
+        ws.Windows[id].Bounds = to;
+        ws.CursorPosition = cursor;
+        engine.OnWindowEvent(new WindowEvent(WindowEventKind.MoveSizeEnded, id));
+    }
+
+    [Fact]
+    public void MergeIntoActive_AddsTheStageWindows_CenteredOnTheDropPoint()
+    {
+        var (ws, engine, _, a1, a2, b) = CreateEnabled();
+        var stageA = engine.ActiveStage!;
+        var stageB = engine.Stages[1];
+
+        engine.MergeIntoActive(stageB, new PointPx(600, 400), suppressTransitions: true);
+
+        Assert.Single(engine.Stages);
+        Assert.Same(stageA, engine.ActiveStage);
+        Assert.Equal(new[] { a1, a2, b }, stageA.Windows);
+        Assert.Contains(2u, stageA.ProcessIds);
+        Assert.False(ws.IsMinimized(b));
+        Assert.Equal(RectPx.FromSize(600 - 400, 400 - 300, 800, 600), ws.BoundsOf(b)); // b is 800x600
+        Assert.Equal(b, ws.Foreground);
+        Assert.Contains($"transitions {b.Value} off", ws.Ops);
+    }
+
+    [Fact]
+    public void MergeIntoActive_KeepsTheDroppedWindowOnScreen()
+    {
+        var (ws, engine, _, _, _, b) = CreateEnabled();
+
+        engine.MergeIntoActive(engine.Stages[1], new PointPx(1900, 50));
+
+        // centered on the drop point it would stick out; it is pushed back inside the available area
+        Assert.Equal(RectPx.FromSize(1708 - 800, 12, 800, 600), ws.BoundsOf(b));
+    }
+
+    [Fact]
+    public void MergedStage_AdoptsNewWindowsOfEveryMemberApp()
+    {
+        var (ws, engine, _, _, _, _) = CreateEnabled();
+        engine.MergeIntoActive(engine.Stages[1], null);
+        var merged = engine.ActiveStage!;
+
+        var c = ws.Add("C", 2); // another window of app 2
+        ws.Foreground = c;
+        engine.OnWindowEvent(new WindowEvent(WindowEventKind.Shown, c));
+
+        Assert.Single(engine.Stages);
+        Assert.Contains(c, merged.Windows);
+        Assert.False(ws.IsMinimized(c));
+    }
+
+    [Fact]
+    public void MergeIntoActive_WithoutAnActiveStage_ActivatesTheStage()
+    {
+        var (ws, engine, _) = Create();
+        var a = ws.Add("A", 1);
+        var b = ws.Add("B", 2);
+        ws.Foreground = a;
+        engine.Enable();
+        ws.Remove(a);
+        engine.OnWindowEvent(new WindowEvent(WindowEventKind.Destroyed, a));
+        Assert.Null(engine.ActiveStage);
+
+        engine.MergeIntoActive(engine.Stages[0], new PointPx(500, 500));
+
+        Assert.Same(engine.Stages[0], engine.ActiveStage);
+        Assert.False(ws.IsMinimized(b));
+    }
+
+    [Fact]
+    public void DroppingAWindowOnTheStrip_MovesItToItsOwnStage_AndItReturnsWhereTheDragBegan()
+    {
+        var (ws, engine, _, a1, a2, _) = CreateEnabled();
+        var stageA = engine.ActiveStage!;
+        var before = ws.BoundsOf(a2);
+
+        DragWindow(ws, engine, a2, new RectPx(1500, 100, 2300, 700), OnStrip);
+
+        Assert.Equal(new[] { a1 }, stageA.Windows);
+        Assert.Equal(3, engine.Stages.Count);
+        var own = engine.Stages[1];
+        Assert.Equal(new[] { a2 }, own.Windows);
+        Assert.True(ws.IsMinimized(a2));
+        Assert.True(engine.GetWindow(a2)!.ParkedByUs);
+        Assert.NotNull(engine.GetWindow(a2)!.Snapshot);
+        Assert.Equal(before, engine.GetWindow(a2)!.StageBounds);
+
+        engine.ActivateStage(own);
+        Assert.Equal(before, ws.BoundsOf(a2));
+    }
+
+    [Fact]
+    public void DroppingOnTheStrip_RaisesAnEventFirst_WhenSomeoneListens()
+    {
+        var (ws, engine, _, _, a2, _) = CreateEnabled();
+        WindowId? dropped = null;
+        engine.DroppedOnStrip += id => dropped = id;
+
+        DragWindow(ws, engine, a2, new RectPx(1500, 100, 2300, 700), OnStrip);
+
+        Assert.Equal(a2, dropped);
+        Assert.False(ws.IsMinimized(a2)); // nothing has happened yet
+        Assert.Equal(2, engine.Stages.Count);
+
+        var picture = engine.PrepareDetach(a2);
+        Assert.NotNull(picture?.Snapshot);
+        engine.CommitDetach(a2, suppressTransitions: true);
+        Assert.True(ws.IsMinimized(a2));
+        Assert.Equal(3, engine.Stages.Count);
+    }
+
+    [Fact]
+    public void ResizingTowardsTheStrip_DoesNotDetach()
+    {
+        var (ws, engine, _, _, a2, _) = CreateEnabled();
+        var stageA = engine.ActiveStage!;
+
+        DragWindow(ws, engine, a2, new RectPx(100, 100, 1900, 700), OnStrip); // width changed: a resize
+
+        Assert.Contains(a2, stageA.Windows);
+        Assert.False(ws.IsMinimized(a2));
+        Assert.Equal(new RectPx(100, 100, 1900, 700), engine.GetWindow(a2)!.StageBounds);
+    }
+
+    [Fact]
+    public void DroppingAwayFromTheStrip_JustRemembersThePlace()
+    {
+        var (ws, engine, _, _, a2, _) = CreateEnabled();
+
+        DragWindow(ws, engine, a2, new RectPx(300, 300, 1100, 900), new PointPx(700, 600));
+
+        Assert.Equal(2, engine.Stages.Count);
+        Assert.Equal(new RectPx(300, 300, 1100, 900), engine.GetWindow(a2)!.StageBounds);
+        Assert.Null(engine.GetWindow(a2)!.DragStartBounds);
+    }
+
+    [Fact]
+    public void DetachingTheOnlyWindow_LeavesNoActiveStage()
+    {
+        var (ws, engine, _) = Create();
+        var a = ws.Add("A", 1);
+        var b = ws.Add("B", 2);
+        ws.Foreground = a;
+        engine.Enable();
+
+        DragWindow(ws, engine, a, new RectPx(1500, 100, 2300, 700), OnStrip);
+
+        Assert.Null(engine.ActiveStage);
+        Assert.Equal(2, engine.Stages.Count);
+        Assert.Equal(new[] { a }, engine.Stages[0].Windows);
+        Assert.True(ws.IsMinimized(a));
+        Assert.True(ws.IsMinimized(b));
+    }
+
+    [Fact]
+    public void UserDrags_AreReported_OnlyForTheActiveStage()
+    {
+        var (ws, engine, _, a1, _, b) = CreateEnabled();
+        var reports = new List<bool>();
+        engine.UserDragChanged += dragging => reports.Add(dragging);
+
+        DragWindow(ws, engine, a1, new RectPx(300, 300, 1100, 900), new PointPx(700, 600));
+        Assert.Equal(new[] { true, false }, reports);
+
+        reports.Clear();
+        engine.OnWindowEvent(new WindowEvent(WindowEventKind.MoveSizeStarted, b)); // parked, not ours to report
+        Assert.Empty(reports);
+    }
+
+    [Fact]
+    public void TransitionsAreTurnedBackOn_AfterADelay()
+    {
+        var (ws, engine, clock, _, a2, _) = CreateEnabled();
+
+        engine.CommitDetach(a2, suppressTransitions: true);
+        Assert.Contains($"transitions {a2.Value} off", ws.Ops);
+        Assert.DoesNotContain($"transitions {a2.Value} on", ws.Ops);
+
+        clock.Advance(TimeSpan.FromMilliseconds(600));
+        engine.Tick();
+        Assert.Contains($"transitions {a2.Value} on", ws.Ops);
+    }
+
     [Fact]
     public void EventsWhileDisabled_AreIgnored()
     {

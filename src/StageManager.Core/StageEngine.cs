@@ -22,6 +22,9 @@ public sealed class StageEngine
     /// <summary>A snapshot of a visible window younger than this is reused by <see cref="PrepareSwap"/> instead of being retaken.</summary>
     public static readonly TimeSpan SnapshotFreshness = TimeSpan.FromMilliseconds(600);
 
+    /// <summary>How long OS transitions stay off after we hid or showed a window without one.</summary>
+    public static readonly TimeSpan TransitionRestoreDelay = TimeSpan.FromMilliseconds(500);
+
     private readonly IWindowSystem _ws;
     private readonly Func<DateTimeOffset> _clock;
     private readonly Action<string>? _log;
@@ -29,7 +32,9 @@ public sealed class StageEngine
     private readonly Dictionary<WindowId, TrackedWindow> _windows = new();
     private readonly Dictionary<WindowId, DateTimeOffset> _pending = new();
     private readonly Dictionary<WindowId, (DateTimeOffset Due, int Attempts)> _settling = new();
+    private readonly Dictionary<WindowId, DateTimeOffset> _transitionRestore = new();
     private StageSwap? _pendingSwap;
+    private WindowId? _userDragging;
 
     public LayoutSettings Layout { get; set; }
     public bool IsEnabled { get; private set; }
@@ -45,6 +50,15 @@ public sealed class StageEngine
     public IReadOnlyList<WindowId> ParkedByUs => _windows.Where(kv => kv.Value.ParkedByUs).Select(kv => kv.Key).ToList();
 
     public event Action? Changed;
+
+    /// <summary>Raised with true when the user starts dragging a window of the active stage, and with false when the drag ends.</summary>
+    public event Action<bool>? UserDragChanged;
+
+    /// <summary>
+    /// Raised when the user drops a window of the active stage on the strip. A subscriber is expected to call
+    /// <see cref="CommitDetach"/>, typically after <see cref="PrepareDetach"/> and an animation; with no subscriber the engine detaches immediately.
+    /// </summary>
+    public event Action<WindowId>? DroppedOnStrip;
 
     public StageEngine(IWindowSystem ws, LayoutSettings? layout = null, Func<DateTimeOffset>? clock = null, Action<string>? log = null)
     {
@@ -72,9 +86,7 @@ public sealed class StageEngine
             if (_windows.ContainsKey(info.Id)) continue;
             // A minimized window reports a bogus off-screen rectangle; its real bounds are learned when it is restored.
             _windows[info.Id] = new TrackedWindow(info) { OriginalBounds = info.IsMinimized ? null : info.Bounds };
-            var stage = FindStageByProcess(info.ProcessId) ?? CreateStage(info, atEnd: true);
-            stage.Windows.Add(info.Id);
-            stage.Primary ??= info.Id;
+            Attach(FindStageByProcess(info.ProcessId) ?? CreateStage(info, atEnd: true), info.Id);
         }
 
         Stage? active = fg is { } f ? FindStageOf(f) : null;
@@ -110,6 +122,7 @@ public sealed class StageEngine
             if (info is { IsMinimized: false, IsMaximized: false } && info.Bounds != original)
                 _ws.SetBounds(id, original);
         }
+        foreach (var id in _transitionRestore.Keys) _ws.SetTransitionsEnabled(id, true);
         Reset();
         IsEnabled = false;
         Log("disabled");
@@ -228,15 +241,134 @@ public sealed class StageEngine
         if (_pendingSwap is { } swap) CommitPresent(swap);
     }
 
+    // ---------------------------------------------------------------- grouping: merge and detach
+
     /// <summary>
-    /// Call periodically (a few times per second). Parks new windows that never became foreground and
-    /// puts back windows whose app moved them right after we placed them.
+    /// Adds every window of <paramref name="source"/> to the active stage, the way dragging a thumbnail onto the
+    /// desktop does on macOS. With an <paramref name="anchor"/> the windows are centered on it (kept on screen);
+    /// without one they keep their remembered places. With no active stage this simply activates the stage.
+    /// </summary>
+    public void MergeIntoActive(Stage source, PointPx? anchor, bool suppressTransitions = false)
+    {
+        if (!IsEnabled || !_stages.Contains(source) || source == ActiveStage) return;
+        FinishPendingSwap();
+        if (ActiveStage == null)
+        {
+            ActivateStage(source);
+            return;
+        }
+
+        var target = ActiveStage;
+        var available = StageLayout.AvailableArea(_ws.GetPrimaryWorkArea(), Layout);
+        var primary = ResolvePrimary(source);
+        Log($"merge {source} into {target}");
+
+        foreach (var id in source.Windows.ToArray())
+        {
+            if (!_windows.TryGetValue(id, out var w)) continue;
+            Detach(source, id);
+            Attach(target, id);
+
+            var info = _ws.GetWindowInfo(id);
+            if (info == null) continue;
+            if (suppressTransitions) SuppressTransitionsFor(id);
+            if (info.IsMinimized)
+            {
+                _ws.RestoreNoActivate(id);
+                w.ParkedByUs = false;
+                info = _ws.GetWindowInfo(id) ?? (info with { IsMinimized = false });
+            }
+            w.OriginalBounds ??= info.Bounds;
+
+            if (info.IsMaximized)
+            {
+                MarkPresented(w, info);
+            }
+            else if (anchor is { } a)
+            {
+                var size = w.StageBounds ?? info.Bounds;
+                ApplyBounds(w, info, StageLayout.Place(size.CenteredAt(a), available, center: false));
+            }
+            else
+            {
+                PlaceWindow(w, info, available, center: false);
+            }
+        }
+
+        _stages.Remove(source);
+        if (primary is { } p)
+        {
+            _ws.Activate(p);
+            target.Primary = p;
+        }
+        RaiseChanged();
+    }
+
+    /// <summary>Takes a picture of a window that is about to leave the active stage, without changing anything.</summary>
+    public SwapWindow? PrepareDetach(WindowId id)
+    {
+        if (!IsEnabled || !_windows.TryGetValue(id, out var w)) return null;
+        var stage = FindStageOf(id);
+        if (stage == null || stage != ActiveStage) return null;
+        var info = _ws.GetWindowInfo(id);
+        if (info == null || info.IsMinimized) return null;
+        w.Info = info;
+        CaptureInto(w, fromScreen: false); // it may overlap the strip right now, so render it rather than copy the screen
+        return new SwapWindow(id, info.Bounds, w.Snapshot, id == stage.Primary);
+    }
+
+    /// <summary>
+    /// Takes a window out of the active stage and parks it in a stage of its own, the way dragging a window onto
+    /// the strip does on macOS. It returns to where its drag began when it is brought back.
+    /// </summary>
+    public void CommitDetach(WindowId id, bool suppressTransitions = false)
+    {
+        if (!IsEnabled || !_windows.TryGetValue(id, out var w)) return;
+        var stage = FindStageOf(id);
+        if (stage == null || stage != ActiveStage) return;
+        FinishPendingSwap();
+
+        var restoreTo = w.DragStartBounds ?? w.StageBounds ?? w.Info.Bounds;
+        w.DragStartBounds = null;
+        _pending.Remove(id);
+        _settling.Remove(id);
+
+        Detach(stage, id); // may dissolve the stage and leave no active stage
+        var own = new Stage(w.Info.ProcessId, w.Info.ProcessName);
+        _stages.Insert(ActiveStage != null && _stages.Count > 0 && _stages[0] == ActiveStage ? 1 : 0, own);
+        Attach(own, id);
+
+        var info = _ws.GetWindowInfo(id);
+        if (info != null && !info.IsMinimized)
+        {
+            w.Info = info;
+            if (!IsFresh(w, SnapshotFreshness)) CaptureInto(w, fromScreen: false);
+            if (suppressTransitions) SuppressTransitionsFor(id);
+            w.ParkedByUs = true;
+            _ws.Minimize(id);
+            w.Info = info with { IsMinimized = true };
+        }
+        w.StageBounds = restoreTo;
+        Log($"detach '{w.Info.Title}' to the strip");
+        RaiseChanged();
+    }
+
+    private void SuppressTransitionsFor(WindowId id)
+    {
+        _ws.SetTransitionsEnabled(id, false);
+        _transitionRestore[id] = _clock() + TransitionRestoreDelay;
+    }
+
+    /// <summary>
+    /// Call periodically (a few times per second). Parks new windows that never became foreground, puts back
+    /// windows whose app moved them right after we placed them, and turns OS transitions back on.
     /// </summary>
     public void Tick()
     {
         if (!IsEnabled) return;
         if (_pending.Count > 0) ProcessPending();
         if (_settling.Count > 0) ProcessSettling();
+        if (_transitionRestore.Count > 0) ProcessTransitionRestore();
     }
 
     private void ProcessPending()
@@ -283,6 +415,17 @@ public sealed class StageEngine
         }
     }
 
+    private void ProcessTransitionRestore()
+    {
+        var now = _clock();
+        foreach (var (id, due) in _transitionRestore.ToArray())
+        {
+            if (now < due) continue;
+            _transitionRestore.Remove(id);
+            _ws.SetTransitionsEnabled(id, true);
+        }
+    }
+
     // ---------------------------------------------------------------- events
 
     public void OnWindowEvent(WindowEvent e)
@@ -299,6 +442,7 @@ public sealed class StageEngine
             case WindowEventKind.Cloaked: break; // another virtual desktop is showing; the window and its stage live on
             case WindowEventKind.MinimizeStarted: OnMinimizeStarted(e.Window); break;
             case WindowEventKind.MinimizeEnded: OnMinimizeEnded(e.Window); break;
+            case WindowEventKind.MoveSizeStarted: OnMoveSizeStarted(e.Window); break;
             case WindowEventKind.MoveSizeEnded: OnMoveSizeEnded(e.Window); break;
         }
     }
@@ -364,11 +508,10 @@ public sealed class StageEngine
             }
             else
             {
-                stage.Windows.Remove(id);
-                if (stage.Primary == id) stage.Primary = stage.Windows[0];
-                var own = new Stage(w.Info.ProcessId, w.Info.ProcessName) { Primary = id };
-                own.Windows.Add(id);
+                Detach(stage, id);
+                var own = new Stage(w.Info.ProcessId, w.Info.ProcessName);
                 _stages.Insert(Math.Min(1, _stages.Count), own);
+                Attach(own, id);
             }
         }
 
@@ -390,14 +533,47 @@ public sealed class StageEngine
         ActivateStage(stage);
     }
 
+    private void OnMoveSizeStarted(WindowId id)
+    {
+        if (!_windows.TryGetValue(id, out var w)) return;
+        if (FindStageOf(id) != ActiveStage) return;
+        var info = _ws.GetWindowInfo(id);
+        if (info == null) return;
+        w.Info = info;
+        w.DragStartBounds = info.Bounds;
+        _userDragging = id;
+        UserDragChanged?.Invoke(true);
+    }
+
     private void OnMoveSizeEnded(WindowId id)
     {
+        bool wasDragging = _userDragging == id;
+        if (wasDragging)
+        {
+            _userDragging = null;
+            UserDragChanged?.Invoke(false);
+        }
+
         if (!_windows.TryGetValue(id, out var w)) return;
         var info = _ws.GetWindowInfo(id);
         if (info == null) return;
         w.Info = info;
         _settling.Remove(id); // the user took over; never fight a drag
-        if (FindStageOf(id) == ActiveStage) w.StageBounds = info.Bounds;
+        if (FindStageOf(id) != ActiveStage) return;
+
+        // A move (not a resize) that ends with the pointer on the strip sends the window there.
+        bool moved = w.DragStartBounds is { } start
+            && start.Width == info.Bounds.Width && start.Height == info.Bounds.Height && start != info.Bounds;
+        var strip = StageLayout.StripArea(_ws.GetPrimaryWorkArea(), Layout);
+        if (wasDragging && moved && strip.Contains(_ws.GetCursorPosition()))
+        {
+            if (DroppedOnStrip != null) DroppedOnStrip(id);
+            else CommitDetach(id);
+            return;
+        }
+
+        w.StageBounds = info.Bounds;
+        w.DragStartBounds = null;
     }
 
     // ---------------------------------------------------------------- window bookkeeping
@@ -407,8 +583,7 @@ public sealed class StageEngine
         var w = new TrackedWindow(info) { OriginalBounds = info.IsMinimized ? null : info.Bounds };
         _windows[info.Id] = w;
         var stage = FindStageByProcess(info.ProcessId) ?? CreateStage(info, atEnd: false);
-        stage.Windows.Add(info.Id);
-        stage.Primary ??= info.Id;
+        Attach(stage, info.Id);
         Log($"add '{info.Title}' -> {stage}");
 
         if (stage == ActiveStage)
@@ -436,19 +611,16 @@ public sealed class StageEngine
     {
         _pending.Remove(id);
         _settling.Remove(id);
+        _transitionRestore.Remove(id);
+        if (_userDragging == id)
+        {
+            _userDragging = null;
+            UserDragChanged?.Invoke(false);
+        }
         if (!_windows.Remove(id, out var w)) return;
 
         var stage = FindStageOf(id);
-        if (stage != null)
-        {
-            stage.Windows.Remove(id);
-            if (stage.Primary == id) stage.Primary = stage.Windows.Count > 0 ? stage.Windows[0] : null;
-            if (stage.Windows.Count == 0)
-            {
-                _stages.Remove(stage);
-                if (stage == ActiveStage) ActiveStage = null;
-            }
-        }
+        if (stage != null) Detach(stage, id);
 
         Log($"remove '{w.Info.Title}'");
         RaiseChanged();
@@ -570,7 +742,28 @@ public sealed class StageEngine
         w.Info = info with { IsMinimized = false };
     }
 
-    // ---------------------------------------------------------------- helpers
+    // ---------------------------------------------------------------- stage membership
+
+    private void Attach(Stage stage, WindowId id)
+    {
+        stage.Windows.Add(id);
+        if (_windows.TryGetValue(id, out var w)) stage.ProcessIds.Add(w.Info.ProcessId);
+        stage.Primary ??= id;
+    }
+
+    /// <summary>Removes a window from a stage; a stage left empty disappears, and the active stage becomes none.</summary>
+    private void Detach(Stage stage, WindowId id)
+    {
+        stage.Windows.Remove(id);
+        if (stage.Primary == id) stage.Primary = stage.Windows.Count > 0 ? stage.Windows[0] : null;
+        stage.ProcessIds.Clear();
+        foreach (var remaining in stage.Windows)
+            if (_windows.TryGetValue(remaining, out var w)) stage.ProcessIds.Add(w.Info.ProcessId);
+
+        if (stage.Windows.Count > 0) return;
+        _stages.Remove(stage);
+        if (stage == ActiveStage) ActiveStage = null;
+    }
 
     private static WindowId? ResolvePrimary(Stage stage)
     {
@@ -580,8 +773,8 @@ public sealed class StageEngine
 
     private Stage? FindStageByProcess(uint pid)
     {
-        if (ActiveStage?.ProcessId == pid) return ActiveStage;
-        return _stages.FirstOrDefault(s => s.ProcessId == pid);
+        if (ActiveStage?.ProcessIds.Contains(pid) == true) return ActiveStage;
+        return _stages.FirstOrDefault(s => s.ProcessIds.Contains(pid));
     }
 
     private Stage CreateStage(WindowInfo info, bool atEnd)
@@ -604,7 +797,9 @@ public sealed class StageEngine
         _windows.Clear();
         _pending.Clear();
         _settling.Clear();
+        _transitionRestore.Clear();
         _pendingSwap = null;
+        _userDragging = null;
         ActiveStage = null;
     }
 

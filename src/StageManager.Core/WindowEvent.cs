@@ -9,6 +9,7 @@ public enum WindowEventKind
     TitleChanged,
     MinimizeStarted,
     MinimizeEnded,
+    MoveSizeStarted,
     MoveSizeEnded,
     Cloaked,
     Uncloaked,

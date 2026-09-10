@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>StageManager.Cli</RootNamespace>
+    <AssemblyName>stagectl</AssemblyName>
+    <UseWPF>true</UseWPF>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\StageManager.Core\StageManager.Core.csproj" />
+    <ProjectReference Include="..\StageManager.Win32\StageManager.Win32.csproj" />
+  </ItemGroup>
+
+</Project>

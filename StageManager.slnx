@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/StageManager.App/StageManager.App.csproj" />
+    <Project Path="src/StageManager.Cli/StageManager.Cli.csproj" />
+    <Project Path="src/StageManager.Core/StageManager.Core.csproj" />
+    <Project Path="src/StageManager.Win32/StageManager.Win32.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/StageManager.Core.Tests/StageManager.Core.Tests.csproj" />
+  </Folder>
+</Solution>

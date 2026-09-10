@@ -1,0 +1,59 @@
+// Windows and enumeration
+EnumWindows
+EnumChildWindows
+IsWindow
+IsWindowVisible
+IsIconic
+IsZoomed
+GetWindowText
+GetClassName
+GetWindowLongPtr
+SetWindowLongPtr
+GetAncestor
+GetWindowRect
+GetWindowThreadProcessId
+GetForegroundWindow
+SetForegroundWindow
+SetWindowPos
+ShowWindow
+keybd_event
+
+// DWM
+DwmGetWindowAttribute
+
+// WinEvent hooks and message pump
+SetWinEventHook
+UnhookWinEvent
+PeekMessage
+TranslateMessage
+DispatchMessage
+
+// Processes
+OpenProcess
+CloseHandle
+QueryFullProcessImageName
+
+// Monitors
+MonitorFromPoint
+GetMonitorInfo
+
+// GDI snapshot
+PrintWindow
+GetDC
+ReleaseDC
+CreateCompatibleDC
+CreateDIBSection
+SelectObject
+DeleteObject
+DeleteDC
+BitBlt
+
+// Hotkeys
+RegisterHotKey
+UnregisterHotKey
+
+// Enums and constants
+WINDOW_LONG_PTR_INDEX
+SET_WINDOW_POS_FLAGS
+SHOW_WINDOW_CMD
+HOT_KEY_MODIFIERS

@@ -19,8 +19,11 @@ public sealed class StageEngine
     /// <summary>How many times a self-moving window is put back before we give up.</summary>
     public const int MaxSettleAttempts = 2;
 
-    /// <summary>A snapshot of a visible window younger than this is reused by <see cref="PrepareSwap"/> instead of being retaken.</summary>
-    public static readonly TimeSpan SnapshotFreshness = TimeSpan.FromMilliseconds(600);
+    /// <summary>
+    /// A snapshot of a visible window younger than this is reused by <see cref="PrepareSwap"/> instead of being retaken.
+    /// Covers the usual pause between the pointer reaching the strip (when a picture is prefetched) and the click.
+    /// </summary>
+    public static readonly TimeSpan SnapshotFreshness = TimeSpan.FromMilliseconds(1500);
 
     /// <summary>How long OS transitions stay off after we hid or showed a window without one.</summary>
     public static readonly TimeSpan TransitionRestoreDelay = TimeSpan.FromMilliseconds(500);
@@ -267,8 +270,8 @@ public sealed class StageEngine
                 var info = _ws.GetWindowInfo(id);
                 if (info == null || info.IsMinimized) continue;
                 w.Info = info;
-                // The outgoing windows are on screen right now, so a screen copy is exact; a fresh prefetched one is reused.
-                if (!IsFresh(w, SnapshotFreshness)) CaptureInto(w, fromScreen: true);
+                // A picture prefetched while the pointer hovered the strip is reused; otherwise take one now.
+                if (!IsFresh(w, SnapshotFreshness)) CaptureInto(w);
                 outgoing.Add(new SwapWindow(id, info.Bounds, w.Snapshot, id == from.Primary));
             }
         }
@@ -310,24 +313,42 @@ public sealed class StageEngine
 
     /// <summary>
     /// Takes pictures of the active stage's visible windows ahead of a likely swap, so the swap itself does not
-    /// have to wait for a capture. Call it when the pointer enters the strip. Cheap when the pictures are recent.
+    /// have to wait for a capture. Synchronous; the app prefers <see cref="SnapshotsToRefresh"/> plus
+    /// <see cref="StoreSnapshot"/> so the capture can run off the UI thread.
     /// </summary>
     public void PrefetchActiveSnapshots(TimeSpan maxAge)
     {
-        if (!IsEnabled || ActiveStage == null) return;
+        foreach (var id in SnapshotsToRefresh(maxAge))
+            if (_windows.TryGetValue(id, out var w)) CaptureInto(w);
+    }
+
+    /// <summary>Visible windows of the active stage whose picture is older than <paramref name="maxAge"/>.</summary>
+    public IReadOnlyList<WindowId> SnapshotsToRefresh(TimeSpan maxAge)
+    {
+        if (!IsEnabled || ActiveStage == null) return Array.Empty<WindowId>();
+        var stale = new List<WindowId>();
         foreach (var id in ActiveStage.Windows)
         {
             if (!_windows.TryGetValue(id, out var w) || w.Info.IsMinimized || IsFresh(w, maxAge)) continue;
-            CaptureInto(w, fromScreen: true);
+            stale.Add(id);
         }
+        return stale;
+    }
+
+    /// <summary>Accepts a picture taken elsewhere (for example on a worker thread) for a window that is still visible.</summary>
+    public void StoreSnapshot(WindowId id, Snapshot snapshot)
+    {
+        if (!_windows.TryGetValue(id, out var w) || w.Info.IsMinimized) return;
+        w.Snapshot = snapshot;
+        w.SnapshotTakenAt = _clock();
     }
 
     private bool IsFresh(TrackedWindow w, TimeSpan maxAge)
         => w.Snapshot != null && w.SnapshotTakenAt is { } at && _clock() - at < maxAge;
 
-    private void CaptureInto(TrackedWindow w, bool fromScreen)
+    private void CaptureInto(TrackedWindow w)
     {
-        var snap = _ws.CaptureSnapshot(w.Info.Id, SnapshotMaxWidth, SnapshotMaxHeight, fromScreen);
+        var snap = _ws.CaptureSnapshot(w.Info.Id, SnapshotMaxWidth, SnapshotMaxHeight);
         if (snap == null) return;
         w.Snapshot = snap;
         w.SnapshotTakenAt = _clock();
@@ -444,7 +465,7 @@ public sealed class StageEngine
         var info = _ws.GetWindowInfo(id);
         if (info == null || info.IsMinimized) return null;
         w.Info = info;
-        CaptureInto(w, fromScreen: false); // it may overlap the strip right now, so render it rather than copy the screen
+        CaptureInto(w); // PrintWindow renders it even where the strip overlaps it
         return new SwapWindow(id, info.Bounds, w.Snapshot, id == stage.Primary);
     }
 
@@ -473,7 +494,7 @@ public sealed class StageEngine
         if (info != null && !info.IsMinimized)
         {
             w.Info = info;
-            if (!IsFresh(w, SnapshotFreshness)) CaptureInto(w, fromScreen: false);
+            if (!IsFresh(w, SnapshotFreshness)) CaptureInto(w);
             if (suppressTransitions) SuppressTransitionsFor(id);
             w.ParkedByUs = true;
             _ws.Minimize(id);
@@ -685,7 +706,7 @@ public sealed class StageEngine
         // The user minimized the window: it goes to the strip, on its own if it left a multi-window stage.
         _pending.Remove(id);
         _settling.Remove(id);
-        CaptureInto(w, fromScreen: false);
+        CaptureInto(w);
         w.StageBounds ??= w.Info.Bounds;
         w.Info = w.Info with { IsMinimized = true };
 
@@ -844,7 +865,7 @@ public sealed class StageEngine
         if (info.IsMinimized) return;
 
         w.StageBounds = info.Bounds;
-        if (captureSnapshot) CaptureInto(w, fromScreen: false);
+        if (captureSnapshot) CaptureInto(w);
         if (suppressTransitions) _ws.SetTransitionsEnabled(id, false);
         w.ParkedByUs = true; // set before minimizing so the resulting event is recognised as ours
         _ws.Minimize(id);

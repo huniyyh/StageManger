@@ -19,6 +19,8 @@ switch (command)
         return Snap(ws, args.Length > 1 ? args[1] : "fg", args.Length > 2 ? args[2] : "snapshot.png");
     case "plan":
         return Plan(ws);
+    case "bench":
+        return Bench(ws, args.Length > 1 ? int.Parse(args[1], CultureInfo.InvariantCulture) : 10);
     default:
         Console.WriteLine("""
             stagectl list              manageable windows as the engine sees them
@@ -77,6 +79,44 @@ static int Snap(Win32WindowSystem ws, string target, string outputPath)
     encoder.Frames.Add(BitmapFrame.Create(bitmap));
     using (var file = File.Create(outputPath)) encoder.Save(file);
     Console.WriteLine($"saved {snapshot.Width}x{snapshot.Height} -> {Path.GetFullPath(outputPath)}");
+    return 0;
+}
+
+/// <summary>Measures what the app pays for: hook traffic while idle and while the mouse moves, and capture cost per method.</summary>
+static int Bench(Win32WindowSystem ws, int seconds)
+{
+    var fg = ws.GetForegroundWindow() ?? ws.EnumerateManageableWindows().FirstOrDefault(w => !w.IsMinimized)?.Id;
+    if (fg is not { } target) { Console.WriteLine("no visible window to capture"); return 1; }
+    var info = ws.GetWindowInfo(target);
+    Console.WriteLine($"capture target: {info?.ProcessName} {info?.Bounds}");
+
+    foreach (bool fromScreen in new[] { false, true })
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        int n = 0;
+        while (sw.ElapsedMilliseconds < 1500) { ws.CaptureSnapshot(target, StageEngine.SnapshotMaxWidth, StageEngine.SnapshotMaxHeight, fromScreen); n++; }
+        Console.WriteLine($"capture {(fromScreen ? "screen copy" : "PrintWindow ")}: {sw.ElapsedMilliseconds / (double)n:F1} ms each ({n} runs)");
+    }
+
+    ws.StartListening();
+    long raw0 = ws.RawEventCount, fwd0 = ws.ForwardedEventCount;
+    Console.WriteLine($"hooks: pumping {seconds}s idle ...");
+    MessagePump.RunFor(TimeSpan.FromSeconds(seconds));
+    Console.WriteLine($"  idle: {(ws.RawEventCount - raw0) / (double)seconds:F0} raw events/s, {(ws.ForwardedEventCount - fwd0) / (double)seconds:F1} forwarded/s");
+
+    raw0 = ws.RawEventCount; fwd0 = ws.ForwardedEventCount;
+    Console.WriteLine($"hooks: pumping {seconds}s while wiggling the mouse ...");
+    var origin = ws.GetCursorPosition();
+    var end = DateTime.UtcNow.AddSeconds(seconds);
+    int step = 0;
+    while (DateTime.UtcNow < end)
+    {
+        NativeWindow.MoveCursor(origin.X + (step % 40) - 20, origin.Y + ((step / 40) % 40) - 20);
+        step++;
+        MessagePump.RunFor(TimeSpan.FromMilliseconds(8));
+    }
+    NativeWindow.MoveCursor(origin.X, origin.Y);
+    Console.WriteLine($"  mouse: {(ws.RawEventCount - raw0) / (double)seconds:F0} raw events/s, {(ws.ForwardedEventCount - fwd0) / (double)seconds:F1} forwarded/s");
     return 0;
 }
 

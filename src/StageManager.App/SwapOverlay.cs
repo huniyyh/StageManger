@@ -146,7 +146,7 @@ internal sealed class SwapOverlay : Window
 
     // ---------------------------------------------------------------- helpers
 
-    /// <summary>A window picture drawn like a window: rounded corners and a soft shadow.</summary>
+    /// <summary>A window picture drawn like a window: rounded corners and, with a GPU to pay for it, a soft shadow.</summary>
     private static FrameworkElement MakePicture(BitmapSource image, double opacity)
     {
         var picture = new Border
@@ -154,7 +154,7 @@ internal sealed class SwapOverlay : Window
             CornerRadius = new CornerRadius(CornerRadiusDip),
             Background = new ImageBrush(image) { Stretch = Stretch.Fill },
             Opacity = opacity,
-            Effect = new DropShadowEffect { BlurRadius = 22, ShadowDepth = 6, Direction = 270, Opacity = 0.38 },
+            Effect = Visuals.SoftwareRendering ? null : new DropShadowEffect { BlurRadius = 22, ShadowDepth = 6, Direction = 270, Opacity = 0.38 },
         };
         RenderOptions.SetBitmapScalingMode(picture, BitmapScalingMode.Linear);
         return picture;

@@ -17,6 +17,7 @@ GetForegroundWindow
 FindWindowEx
 PostMessage
 GetCursorPos
+SetCursorPos
 GetAsyncKeyState
 SetForegroundWindow
 SetWindowPos

@@ -25,7 +25,8 @@ if ($OutputDir -eq "") { $OutputDir = Join-Path $root "Releases" }
 
 Write-Host "== publishing v$Version ==" -ForegroundColor Cyan
 if (Test-Path $publishDir) { Remove-Item -Recurse -Force $publishDir }
-dotnet publish (Join-Path $root "src\StageManager.App") -c Release -r win-x64 --self-contained false -o $publishDir -p:Version=$Version -nologo
+# ReadyToRun precompiles the app so the first swap after launch does not pay for JIT compilation.
+dotnet publish (Join-Path $root "src\StageManager.App") -c Release -r win-x64 --self-contained false -o $publishDir -p:Version=$Version -p:PublishReadyToRun=true -nologo
 if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed" }
 
 Write-Host "== packing with Velopack ==" -ForegroundColor Cyan

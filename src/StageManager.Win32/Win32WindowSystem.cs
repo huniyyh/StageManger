@@ -14,7 +14,7 @@ namespace StageManager.Win32;
 /// <summary>
 /// Win32 implementation of <see cref="IWindowSystem"/>. Window events are delivered through an
 /// out-of-context WinEvent hook, so <see cref="StartListening"/> must be called on a thread that pumps messages
-/// and events arrive on that same thread.
+/// and events arrive on that same thread. <see cref="CaptureSnapshot"/> may be called from any thread.
 /// </summary>
 public sealed unsafe class Win32WindowSystem : IWindowSystem, IDisposable
 {
@@ -49,6 +49,12 @@ public sealed unsafe class Win32WindowSystem : IWindowSystem, IDisposable
     private WINEVENTPROC? _hookProc; // must stay referenced for as long as the hooks live
 
     public event Action<WindowEvent>? WindowChanged;
+
+    /// <summary>Raw hook callbacks received, before any filtering. A cheap gauge of how busy the hooks make us.</summary>
+    public long RawEventCount { get; private set; }
+
+    /// <summary>Events that passed the filters and were forwarded.</summary>
+    public long ForwardedEventCount { get; private set; }
 
     public Win32WindowSystem(Action<string>? log = null) => _log = log;
 
@@ -151,6 +157,28 @@ public sealed unsafe class Win32WindowSystem : IWindowSystem, IDisposable
 
     // ---------------------------------------------------------------- snapshot
 
+    /// <summary>A memory DC with a top-down 32bpp DIB, kept between captures so no 8MB surface is allocated per picture.</summary>
+    private struct CaptureSurface
+    {
+        public HDC Dc;
+        public HBITMAP Bitmap;
+        public void* Bits;
+        public int Width;
+        public int Height;
+
+        public readonly bool Fits(int w, int h) => !Bitmap.IsNull && w <= Width && h <= Height;
+        public readonly int Stride => Width * 4;
+    }
+
+    private readonly object _captureLock = new();
+    private CaptureSurface _full;  // the window at full size
+    private CaptureSurface _small; // the shrunken picture
+
+    /// <summary>
+    /// PrintWindow asks the window to render itself, which works even when it is covered and, under DWM, is
+    /// about twice as fast as copying the screen. The screen copy remains as the fallback for windows that
+    /// render nothing, and as an explicit option.
+    /// </summary>
     public Snapshot? CaptureSnapshot(WindowId id, int maxWidth, int maxHeight, bool fromScreen = false)
     {
         var hwnd = ToHwnd(id);
@@ -168,87 +196,99 @@ public sealed unsafe class Win32WindowSystem : IWindowSystem, IDisposable
             Math.Min(w, frame.right - rc.left), Math.Min(h, frame.bottom - rc.top));
         if (crop.Width <= 0 || crop.Height <= 0) crop = new RectPx(0, 0, w, h);
 
-        HDC screen = PInvoke.GetDC(HWND.Null);
-        if (screen.IsNull) return null;
-        try
+        lock (_captureLock)
         {
-            var mem = PInvoke.CreateCompatibleDC(screen);
+            HDC screen = PInvoke.GetDC(HWND.Null);
+            if (screen.IsNull) return null;
             try
             {
-                var bmi = new BITMAPINFO();
-                bmi.bmiHeader.biSize = (uint)sizeof(BITMAPINFOHEADER);
-                bmi.bmiHeader.biWidth = w;
-                bmi.bmiHeader.biHeight = -h; // top-down
-                bmi.bmiHeader.biPlanes = 1;
-                bmi.bmiHeader.biBitCount = 32;
-                void* bits = null;
-                var bmp = PInvoke.CreateDIBSection(screen, &bmi, DIB_USAGE.DIB_RGB_COLORS, &bits, HANDLE.Null, 0);
-                if (bmp.IsNull || bits == null) return null;
-                try
-                {
-                    var previous = PInvoke.SelectObject(mem, bmp);
-                    var pixels = new ReadOnlySpan<byte>(bits, w * h * 4);
-                    bool ok = !fromScreen && PInvoke.PrintWindow(hwnd, mem, (PRINT_WINDOW_FLAGS)PW_RENDERFULLCONTENT);
-                    if (!ok || LooksBlank(pixels))
-                    {
-                        // Copy what is on screen: exact for a visible window, and the fallback when PrintWindow gives nothing.
-                        PInvoke.BitBlt(mem, 0, 0, w, h, screen, rc.left, rc.top, ROP_CODE.SRCCOPY);
-                    }
-                    var snapshot = Shrink(screen, mem, w, h, crop, maxWidth, maxHeight);
-                    PInvoke.SelectObject(mem, previous);
-                    return snapshot;
-                }
-                finally { PInvoke.DeleteObject(bmp); }
+                if (!EnsureSurface(ref _full, screen, w, h)) return null;
+                bool ok = !fromScreen && PInvoke.PrintWindow(hwnd, _full.Dc, (PRINT_WINDOW_FLAGS)PW_RENDERFULLCONTENT);
+                if (!ok || LooksBlank(_full, w, h))
+                    PInvoke.BitBlt(_full.Dc, 0, 0, w, h, screen, rc.left, rc.top, ROP_CODE.SRCCOPY);
+                return Shrink(screen, w, h, crop, maxWidth, maxHeight);
             }
-            finally { PInvoke.DeleteDC(mem); }
+            finally { PInvoke.ReleaseDC(HWND.Null, screen); }
         }
-        finally { PInvoke.ReleaseDC(HWND.Null, screen); }
     }
 
-    private static bool LooksBlank(ReadOnlySpan<byte> bgra)
+    /// <summary>Makes sure the surface can hold w x h pixels, growing it when needed and keeping it otherwise.</summary>
+    private static bool EnsureSurface(ref CaptureSurface s, HDC screen, int w, int h)
     {
-        int step = Math.Max(4, bgra.Length / 4 / 2000 * 4); // roughly 2000 samples
-        for (int i = 0; i + 2 < bgra.Length; i += step)
-            if (bgra[i] != 0 || bgra[i + 1] != 0 || bgra[i + 2] != 0) return false;
+        if (s.Fits(w, h)) return true;
+        if (s.Dc.IsNull)
+        {
+            s.Dc = PInvoke.CreateCompatibleDC(screen);
+            if (s.Dc.IsNull) return false;
+        }
+
+        int width = Math.Max(w, s.Width), height = Math.Max(h, s.Height);
+        var bmi = new BITMAPINFO();
+        bmi.bmiHeader.biSize = (uint)sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = width;
+        bmi.bmiHeader.biHeight = -height; // top-down
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        void* bits = null;
+        var bitmap = PInvoke.CreateDIBSection(screen, &bmi, DIB_USAGE.DIB_RGB_COLORS, &bits, HANDLE.Null, 0);
+        if (bitmap.IsNull || bits == null) return false;
+
+        PInvoke.SelectObject(s.Dc, bitmap);
+        if (!s.Bitmap.IsNull) PInvoke.DeleteObject(s.Bitmap); // the old one is no longer selected
+        s.Bitmap = bitmap;
+        s.Bits = bits;
+        s.Width = width;
+        s.Height = height;
         return true;
     }
 
-    /// <summary>Scales the cropped region of a captured bitmap down with GDI's halftone (box) filter and copies the pixels out.</summary>
-    private static Snapshot? Shrink(HDC screen, HDC source, int srcWidth, int srcHeight, RectPx crop, int maxWidth, int maxHeight)
+    private static bool LooksBlank(in CaptureSurface s, int w, int h)
+    {
+        byte* pixels = (byte*)s.Bits;
+        int stride = s.Stride;
+        int stepX = Math.Max(1, w / 48), stepY = Math.Max(1, h / 40); // roughly 2000 samples within the window's area
+        for (int y = 0; y < h; y += stepY)
+        {
+            byte* row = pixels + (long)y * stride;
+            for (int x = 0; x < w; x += stepX)
+            {
+                byte* px = row + x * 4;
+                if (px[0] != 0 || px[1] != 0 || px[2] != 0) return false;
+            }
+        }
+        return true;
+    }
+
+    /// <summary>Scales the cropped region of the full surface down with GDI's halftone (box) filter and copies the pixels out.</summary>
+    private Snapshot? Shrink(HDC screen, int srcWidth, int srcHeight, RectPx crop, int maxWidth, int maxHeight)
     {
         var insets = new Insets(crop.Left, crop.Top, srcWidth - crop.Right, srcHeight - crop.Bottom);
         int cw = crop.Width, ch = crop.Height;
         double scale = Math.Min(1.0, Math.Min((double)maxWidth / cw, (double)maxHeight / ch));
         int dw = Math.Max(1, (int)(cw * scale)), dh = Math.Max(1, (int)(ch * scale));
+        if (!EnsureSurface(ref _small, screen, dw, dh)) return null;
 
-        var dc = PInvoke.CreateCompatibleDC(screen);
-        try
+        PInvoke.SetStretchBltMode(_small.Dc, STRETCH_BLT_MODE.HALFTONE);
+        PInvoke.SetBrushOrgEx(_small.Dc, 0, 0, null);
+        PInvoke.StretchBlt(_small.Dc, 0, 0, dw, dh, _full.Dc, crop.Left, crop.Top, cw, ch, ROP_CODE.SRCCOPY);
+
+        var dst = new byte[dw * dh * 4];
+        int rowBytes = dw * 4;
+        byte* src = (byte*)_small.Bits;
+        fixed (byte* d = dst)
         {
-            var bmi = new BITMAPINFO();
-            bmi.bmiHeader.biSize = (uint)sizeof(BITMAPINFOHEADER);
-            bmi.bmiHeader.biWidth = dw;
-            bmi.bmiHeader.biHeight = -dh; // top-down
-            bmi.bmiHeader.biPlanes = 1;
-            bmi.bmiHeader.biBitCount = 32;
-            void* bits = null;
-            var bmp = PInvoke.CreateDIBSection(screen, &bmi, DIB_USAGE.DIB_RGB_COLORS, &bits, HANDLE.Null, 0);
-            if (bmp.IsNull || bits == null) return null;
-            try
-            {
-                var previous = PInvoke.SelectObject(dc, bmp);
-                PInvoke.SetStretchBltMode(dc, STRETCH_BLT_MODE.HALFTONE);
-                PInvoke.SetBrushOrgEx(dc, 0, 0, null);
-                PInvoke.StretchBlt(dc, 0, 0, dw, dh, source, crop.Left, crop.Top, cw, ch, ROP_CODE.SRCCOPY);
-
-                var dst = new byte[dw * dh * 4];
-                new ReadOnlySpan<byte>(bits, dst.Length).CopyTo(dst);
-                for (int i = 3; i < dst.Length; i += 4) dst[i] = 255; // GDI leaves alpha undefined
-                PInvoke.SelectObject(dc, previous);
-                return new Snapshot(dw, dh, dst, DateTimeOffset.UtcNow, insets);
-            }
-            finally { PInvoke.DeleteObject(bmp); }
+            for (int y = 0; y < dh; y++)
+                Buffer.MemoryCopy(src + (long)y * _small.Stride, d + (long)y * rowBytes, rowBytes, rowBytes);
         }
-        finally { PInvoke.DeleteDC(dc); }
+        for (int i = 3; i < dst.Length; i += 4) dst[i] = 255; // GDI leaves alpha undefined
+        return new Snapshot(dw, dh, dst, DateTimeOffset.UtcNow, insets);
+    }
+
+    private static void ReleaseSurface(ref CaptureSurface s)
+    {
+        if (!s.Bitmap.IsNull) PInvoke.DeleteObject(s.Bitmap);
+        if (!s.Dc.IsNull) PInvoke.DeleteDC(s.Dc);
+        s = default;
     }
 
     // ---------------------------------------------------------------- events
@@ -265,6 +305,7 @@ public sealed unsafe class Win32WindowSystem : IWindowSystem, IDisposable
 
     private void HookCallback(HWINEVENTHOOK hook, uint eventId, HWND hwnd, int idObject, int idChild, uint threadId, uint time)
     {
+        RawEventCount++;
         if (hwnd.IsNull || idObject != 0 || idChild != 0) return; // OBJID_WINDOW / CHILDID_SELF only
 
         WindowEventKind kind;
@@ -290,6 +331,7 @@ public sealed unsafe class Win32WindowSystem : IWindowSystem, IDisposable
 
         try
         {
+            ForwardedEventCount++;
             WindowChanged?.Invoke(new WindowEvent(kind, ToId(hwnd)));
         }
         catch (Exception ex)
@@ -305,6 +347,11 @@ public sealed unsafe class Win32WindowSystem : IWindowSystem, IDisposable
         _hookProc = null;
         _desktopsKey?.Dispose();
         _desktopsKey = null;
+        lock (_captureLock)
+        {
+            ReleaseSurface(ref _full);
+            ReleaseSurface(ref _small);
+        }
     }
 
     // ---------------------------------------------------------------- probing

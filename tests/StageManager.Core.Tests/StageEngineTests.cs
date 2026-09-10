@@ -571,6 +571,37 @@ public class StageEngineTests
     }
 
     [Fact]
+    public void SnapshotsTakenElsewhere_CanBeStored_AndAreReusedByPrepareSwap()
+    {
+        var (ws, engine, clock, a1, a2, b) = CreateEnabled();
+        clock.Advance(TimeSpan.FromSeconds(5)); // the pictures from Enable are old now
+
+        var stale = engine.SnapshotsToRefresh(TimeSpan.FromMilliseconds(300));
+        Assert.Equal(new[] { a1, a2 }, stale);
+        Assert.DoesNotContain(b, stale); // parked windows are never refreshed
+
+        int captures = ws.CaptureCount;
+        engine.StoreSnapshot(a1, new Snapshot(2, 2, new byte[16], DateTimeOffset.UnixEpoch));
+        engine.StoreSnapshot(a2, new Snapshot(2, 2, new byte[16], DateTimeOffset.UnixEpoch));
+        Assert.Empty(engine.SnapshotsToRefresh(TimeSpan.FromMilliseconds(300)));
+
+        engine.PrepareSwap(engine.Stages[1]);
+        Assert.Equal(captures, ws.CaptureCount); // both pictures were fresh
+        Assert.Equal(2, engine.GetWindow(a1)!.Snapshot!.Width);
+    }
+
+    [Fact]
+    public void StoreSnapshot_IgnoresWindowsThatAreNoLongerVisible()
+    {
+        var (_, engine, _, _, _, b) = CreateEnabled();
+        var before = engine.GetWindow(b)!.Snapshot;
+
+        engine.StoreSnapshot(b, new Snapshot(2, 2, new byte[16], DateTimeOffset.UnixEpoch)); // b is minimized
+
+        Assert.Same(before, engine.GetWindow(b)!.Snapshot);
+    }
+
+    [Fact]
     public void PrepareSwap_RetakesOldPictures()
     {
         var (ws, engine, clock, _, _, _) = CreateEnabled();

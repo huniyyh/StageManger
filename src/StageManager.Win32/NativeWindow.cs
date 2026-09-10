@@ -42,6 +42,8 @@ public static class NativeWindow
         return new PointPx(p.X, p.Y);
     }
 
+    public static void MoveCursor(int x, int y) => PInvoke.SetCursorPos(x, y);
+
     /// <summary>
     /// Whether the primary mouse button is down right now, straight from the input system. Needed because a
     /// window that never activates cannot capture the mouse and so stops hearing about it once the pointer leaves.

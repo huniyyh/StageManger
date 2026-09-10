@@ -62,6 +62,14 @@ public partial class StripWindow : Window
         _engine.UserDragChanged += OnUserDragChanged;
         _engine.DroppedOnStrip += OnWindowDroppedOnStrip;
 
+        Log.Write("visuals: " + Visuals.Description);
+        if (Visuals.SoftwareRendering)
+        {
+            // Without a GPU every blur is computed on the CPU for every frame; the cards look fine without them.
+            Resources["ThumbShadow"] = null;
+            Resources["TextShadow"] = null;
+        }
+
         // Create the HWND now so the layout settings are correct before the engine is first enabled.
         new WindowInteropHelper(this).EnsureHandle();
     }
@@ -328,17 +336,59 @@ public partial class StripWindow : Window
     }
 
     // The pointer arriving over the strip usually means a click is coming: take the outgoing pictures now,
-    // so the swap itself does not have to wait for a screen capture.
+    // so the swap itself does not have to wait for a capture.
     protected override void OnMouseEnter(MouseEventArgs e)
     {
         base.OnMouseEnter(e);
-        if (!_swapInProgress) _engine.PrefetchActiveSnapshots(TimeSpan.FromMilliseconds(300));
+        if (!_swapInProgress) _ = PrefetchAsync(TimeSpan.FromMilliseconds(300));
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
         base.OnMouseMove(e);
-        if (!_swapInProgress) _engine.PrefetchActiveSnapshots(TimeSpan.FromSeconds(1));
+        if (!_swapInProgress) _ = PrefetchAsync(TimeSpan.FromSeconds(1));
+    }
+
+    private readonly HashSet<WindowId> _capturing = new();
+    private Task _prefetch = Task.CompletedTask;
+
+    /// <summary>
+    /// Refreshes stale pictures of the active stage on a worker thread. Rendering a big window takes tens of
+    /// milliseconds, which would otherwise stall the UI thread every time the pointer crosses the strip.
+    /// </summary>
+    private Task PrefetchAsync(TimeSpan maxAge)
+    {
+        var stale = _engine.SnapshotsToRefresh(maxAge).Where(_capturing.Add).ToList();
+        if (stale.Count == 0) return _prefetch;
+        _prefetch = CaptureAllAsync(stale);
+        return _prefetch;
+    }
+
+    private async Task CaptureAllAsync(List<WindowId> ids)
+    {
+        foreach (var id in ids)
+        {
+            try
+            {
+                var snapshot = await Task.Run(() => _ws.CaptureSnapshot(id, StageEngine.SnapshotMaxWidth, StageEngine.SnapshotMaxHeight));
+                if (snapshot != null) _engine.StoreSnapshot(id, snapshot); // back on the UI thread
+            }
+            catch (Exception ex)
+            {
+                Log.Write("prefetch failed: " + ex.Message);
+            }
+            finally
+            {
+                _capturing.Remove(id);
+            }
+        }
+    }
+
+    /// <summary>Gives an in-flight prefetch a moment to finish so the swap can reuse its picture instead of taking another.</summary>
+    private async Task AwaitPrefetchAsync()
+    {
+        if (_prefetch.IsCompleted) return;
+        await Task.WhenAny(_prefetch, Task.Delay(250));
     }
 
     // ---------------------------------------------------------------- pressing and dragging cards
@@ -554,6 +604,9 @@ public partial class StripWindow : Window
     private async Task SwapToAsync(StageItem item)
     {
         if (_swapInProgress) return;
+        _swapInProgress = true; // reserve the slot while we wait; released below or in finally
+        await AwaitPrefetchAsync();
+        _swapInProgress = false;
         var clock = System.Diagnostics.Stopwatch.StartNew();
         var swap = _engine.PrepareSwap(item.Stage, suppressTransitions: true);
         if (swap == null) return;

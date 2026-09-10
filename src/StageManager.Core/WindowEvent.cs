@@ -11,6 +11,8 @@ public enum WindowEventKind
     MinimizeEnded,
     MoveSizeStarted,
     MoveSizeEnded,
+    /// <summary>Position, size or state changed, including maximize and restore. Frequent; handled lazily.</summary>
+    LocationChanged,
     Cloaked,
     Uncloaked,
 }

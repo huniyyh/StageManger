@@ -76,7 +76,11 @@
             </DataTemplate.Triggers>
         </DataTemplate>
     </Window.Resources>
-    <Grid>
+    <!-- The whole strip slides off the edge when the active stage covers its area; see StripWindow.Slide. -->
+    <Grid x:Name="StripRoot">
+        <Grid.RenderTransform>
+            <TranslateTransform x:Name="StripSlide" />
+        </Grid.RenderTransform>
         <!-- Lit up while the user drags a window over the strip: "drop it here to send it to the strip". -->
         <Border x:Name="DropHighlight" Margin="6,10" CornerRadius="14" Background="#26FFFFFF"
                 BorderBrush="#99FFFFFF" BorderThickness="2" Visibility="Collapsed" IsHitTestVisible="False" />

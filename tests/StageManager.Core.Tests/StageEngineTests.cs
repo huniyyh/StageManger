@@ -1091,6 +1091,62 @@ public class StageEngineTests
         Assert.False(ws.IsMinimized(d)); // desktop 2
     }
 
+    // ---------------------------------------------------------------- strip auto-hide
+
+    [Fact]
+    public void StripIsCovered_WhenAnActiveWindowIsMaximized()
+    {
+        var (ws, engine, _, a1, _, _) = CreateEnabled();
+        int changes = 0;
+        engine.Changed += () => changes++;
+        Assert.False(engine.IsStripCovered);
+
+        ws.Windows[a1].Info = ws.Windows[a1].Info with { IsMaximized = true };
+        engine.OnWindowEvent(new WindowEvent(WindowEventKind.LocationChanged, a1));
+        Assert.False(engine.IsStripCovered); // not before the next tick
+        engine.Tick();
+
+        Assert.True(engine.IsStripCovered);
+        Assert.Equal(1, changes);
+        engine.Tick();
+        Assert.Equal(1, changes); // no repeat while nothing flips
+
+        ws.Windows[a1].Info = ws.Windows[a1].Info with { IsMaximized = false };
+        engine.OnWindowEvent(new WindowEvent(WindowEventKind.LocationChanged, a1));
+        engine.Tick();
+        Assert.False(engine.IsStripCovered);
+        Assert.Equal(2, changes);
+    }
+
+    [Fact]
+    public void StripIsCovered_WhenAnActiveWindowLiesOverIt()
+    {
+        var (ws, engine, _, a1, _, _) = CreateEnabled();
+
+        ws.Windows[a1].Bounds = new RectPx(1500, 100, 2300, 700); // the strip is x 1720..1920
+        engine.OnWindowEvent(new WindowEvent(WindowEventKind.LocationChanged, a1));
+        engine.Tick();
+        Assert.True(engine.IsStripCovered);
+
+        ws.Windows[a1].Bounds = new RectPx(100, 100, 900, 700);
+        engine.OnWindowEvent(new WindowEvent(WindowEventKind.LocationChanged, a1));
+        engine.Tick();
+        Assert.False(engine.IsStripCovered);
+    }
+
+    [Fact]
+    public void ParkedWindows_DoNotCoverTheStrip()
+    {
+        var (ws, engine, _, _, _, b) = CreateEnabled();
+
+        ws.Windows[b].Bounds = new RectPx(1500, 100, 2300, 700);
+        ws.Windows[b].Info = ws.Windows[b].Info with { IsMaximized = true };
+        engine.OnWindowEvent(new WindowEvent(WindowEventKind.LocationChanged, b));
+        engine.Tick();
+
+        Assert.False(engine.IsStripCovered);
+    }
+
     [Fact]
     public void EventsWhileDisabled_AreIgnored()
     {

@@ -32,6 +32,7 @@ public sealed unsafe class Win32WindowSystem : IWindowSystem, IDisposable
     private const uint EVENT_OBJECT_DESTROY = 0x8001;
     private const uint EVENT_OBJECT_SHOW = 0x8002;
     private const uint EVENT_OBJECT_HIDE = 0x8003;
+    private const uint EVENT_OBJECT_LOCATIONCHANGE = 0x800B;
     private const uint EVENT_OBJECT_NAMECHANGE = 0x800C;
     private const uint EVENT_OBJECT_CLOAKED = 0x8017;
     private const uint EVENT_OBJECT_UNCLOAKED = 0x8018;
@@ -278,6 +279,7 @@ public sealed unsafe class Win32WindowSystem : IWindowSystem, IDisposable
             case EVENT_OBJECT_HIDE: kind = WindowEventKind.Hidden; break;
             case EVENT_OBJECT_DESTROY: kind = WindowEventKind.Destroyed; break;
             case EVENT_OBJECT_NAMECHANGE: kind = WindowEventKind.TitleChanged; break;
+            case EVENT_OBJECT_LOCATIONCHANGE: kind = WindowEventKind.LocationChanged; break;
             case EVENT_OBJECT_CLOAKED: kind = WindowEventKind.Cloaked; break;
             case EVENT_OBJECT_UNCLOAKED: kind = WindowEventKind.Uncloaked; break;
             default: return;

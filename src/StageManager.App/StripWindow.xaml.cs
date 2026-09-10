@@ -22,6 +22,10 @@ public partial class StripWindow : Window
     private static readonly TimeSpan RevealDelay = TimeSpan.FromMilliseconds(120);
     private static readonly TimeSpan CardSlideDuration = TimeSpan.FromMilliseconds(320);
     private static readonly TimeSpan CardFadeDuration = TimeSpan.FromMilliseconds(160);
+    private static readonly TimeSpan StripSlideDuration = TimeSpan.FromMilliseconds(220);
+    private static readonly TimeSpan PeekDwell = TimeSpan.FromMilliseconds(150);
+    private static readonly TimeSpan PeekLinger = TimeSpan.FromMilliseconds(400);
+    private const int EdgeZonePx = 6;
 
     private readonly StageEngine _engine;
     private readonly IWindowSystem _ws;
@@ -29,8 +33,13 @@ public partial class StripWindow : Window
     private readonly Dictionary<string, BitmapSource?> _icons = new(StringComparer.OrdinalIgnoreCase);
     private readonly DispatcherTimer _pressTimer;
     private readonly DispatcherTimer _windowDragTimer;
+    private readonly DispatcherTimer _peekTimer;
     private bool _swapInProgress;
     private bool _suppressRefresh;
+    private bool _slidOut;
+    private bool _peeking;
+    private DateTime _edgeSince = DateTime.MinValue;
+    private DateTime _leftSince = DateTime.MinValue;
     private Stage? _stageLeavingStrip;
     private SwapOverlay? _overlay;
     private CardPress? _press;
@@ -48,6 +57,8 @@ public partial class StripWindow : Window
         _pressTimer.Tick += OnPressTick;
         _windowDragTimer = new DispatcherTimer(DispatcherPriority.Input) { Interval = TimeSpan.FromMilliseconds(30) };
         _windowDragTimer.Tick += OnWindowDragTick;
+        _peekTimer = new DispatcherTimer(DispatcherPriority.Input) { Interval = TimeSpan.FromMilliseconds(60) };
+        _peekTimer.Tick += OnPeekTick;
         _engine.UserDragChanged += OnUserDragChanged;
         _engine.DroppedOnStrip += OnWindowDroppedOnStrip;
 
@@ -89,6 +100,12 @@ public partial class StripWindow : Window
             Hide();
             _overlay?.Hide();
             Items.Clear();
+            _peekTimer.Stop();
+            _peeking = false;
+            _slidOut = false;
+            StripSlide.BeginAnimation(TranslateTransform.XProperty, null);
+            StripSlide.X = 0;
+            StripRoot.IsHitTestVisible = true;
             return;
         }
 
@@ -115,9 +132,93 @@ public partial class StripWindow : Window
             }
         });
         if (!IsVisible) Show();
+        UpdateCoverage();
 
         _overlay ??= new SwapOverlay();
         _overlay.EnsureVisible(_ws.GetPrimaryWorkArea());
+    }
+
+    // ---------------------------------------------------------------- getting out of the way
+
+    /// <summary>
+    /// When the active stage covers the strip's area (a maximized window, or one dragged over it) the strip slides
+    /// off the screen edge, like macOS hides its strip when a window needs the space. Resting the pointer on the
+    /// edge peeks it back in until the pointer leaves.
+    /// </summary>
+    private void UpdateCoverage()
+    {
+        bool covered = _engine.IsStripCovered;
+        if (covered)
+        {
+            if (!_peekTimer.IsEnabled) _peekTimer.Start();
+        }
+        else
+        {
+            _peekTimer.Stop();
+            _peeking = false;
+            _edgeSince = DateTime.MinValue;
+            _leftSince = DateTime.MinValue;
+        }
+        Slide(hidden: covered && !_peeking);
+    }
+
+    private void Slide(bool hidden)
+    {
+        if (_slidOut == hidden) return;
+        _slidOut = hidden;
+        StripRoot.IsHitTestVisible = !hidden;
+        double to = hidden ? StripWidthDip + 16 : 0;
+        StripSlide.BeginAnimation(TranslateTransform.XProperty,
+            new DoubleAnimation(to, StripSlideDuration) { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } });
+    }
+
+    private void OnPeekTick(object? sender, EventArgs e)
+    {
+        if (_swapInProgress || _press != null)
+        {
+            _leftSince = DateTime.MinValue;
+            return;
+        }
+
+        var cursor = NativeWindow.GetCursorPosition();
+        var area = StripArea();
+        var now = DateTime.UtcNow;
+        bool inStrip = area.Contains(cursor);
+        bool atEdge = cursor.X >= area.Right - EdgeZonePx && cursor.Y >= area.Top && cursor.Y < area.Bottom;
+
+        if (!_peeking)
+        {
+            if (!atEdge)
+            {
+                _edgeSince = DateTime.MinValue;
+                return;
+            }
+            if (_edgeSince == DateTime.MinValue)
+            {
+                _edgeSince = now;
+                return;
+            }
+            if (now - _edgeSince < PeekDwell) return; // a deliberate rest on the edge, not a pass-through
+            _peeking = true;
+            _leftSince = DateTime.MinValue;
+            Slide(hidden: false);
+            return;
+        }
+
+        if (inStrip)
+        {
+            _leftSince = DateTime.MinValue;
+            return;
+        }
+        if (_leftSince == DateTime.MinValue)
+        {
+            _leftSince = now;
+            return;
+        }
+        if (now - _leftSince < PeekLinger) return;
+        _peeking = false;
+        _edgeSince = DateTime.MinValue;
+        Slide(hidden: true);
     }
 
     /// <summary>
@@ -392,6 +493,11 @@ public partial class StripWindow : Window
     {
         bool over = StripArea().Contains(NativeWindow.GetCursorPosition());
         DropHighlight.Visibility = over ? Visibility.Visible : Visibility.Collapsed;
+        if (over && _slidOut)
+        {
+            _peeking = true; // a window being dragged onto a hidden strip brings it out to receive the drop
+            Slide(hidden: false);
+        }
     }
 
     /// <summary>The user dropped a stage window on the strip: its picture shrinks into the top slot while the window is parked.</summary>

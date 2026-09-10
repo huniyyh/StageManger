@@ -19,5 +19,7 @@ public readonly record struct RectPx(int Left, int Top, int Right, int Bottom)
 
     public bool Contains(PointPx p) => p.X >= Left && p.X < Right && p.Y >= Top && p.Y < Bottom;
 
+    public bool IntersectsWith(RectPx o) => Left < o.Right && o.Left < Right && Top < o.Bottom && o.Top < Bottom;
+
     public override string ToString() => $"({Left},{Top}) {Width}x{Height}";
 }

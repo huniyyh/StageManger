@@ -41,6 +41,8 @@ public sealed class StageEngine
     private readonly Dictionary<WindowId, (DateTimeOffset Due, int Attempts)> _settling = new();
     private readonly Dictionary<WindowId, DateTimeOffset> _transitionRestore = new();
     private readonly HashSet<WindowId> _review = new();
+    private readonly HashSet<WindowId> _moved = new();
+    private bool _stripCovered;
     private DesktopState _current = new();
     private Guid _currentDesktop;
     private StageSwap? _pendingSwap;
@@ -66,6 +68,13 @@ public sealed class StageEngine
 
     /// <summary>Windows currently minimized by the engine on any desktop; persisted so a crash can be undone.</summary>
     public IReadOnlyList<WindowId> ParkedByUs => _windows.Where(kv => kv.Value.ParkedByUs).Select(kv => kv.Key).ToList();
+
+    /// <summary>
+    /// True when a visible window of the active stage is maximized or lies over the strip, so the strip should get
+    /// out of the way (as on macOS, where the strip hides when a window needs the space). <see cref="Changed"/> is
+    /// raised when this flips.
+    /// </summary>
+    public bool IsStripCovered => _stripCovered;
 
     public event Action? Changed;
 
@@ -494,6 +503,41 @@ public sealed class StageEngine
         if (_pending.Count > 0) ProcessPending();
         if (_settling.Count > 0) ProcessSettling();
         if (_transitionRestore.Count > 0) ProcessTransitionRestore();
+        if (_moved.Count > 0) ProcessMoved();
+        UpdateStripCovered();
+    }
+
+    /// <summary>Re-reads windows that reported a location change since the last tick (coalesced: drags report constantly).</summary>
+    private void ProcessMoved()
+    {
+        foreach (var id in _moved)
+        {
+            if (!_windows.TryGetValue(id, out var w)) continue;
+            var info = _ws.GetWindowInfo(id);
+            if (info != null) w.Info = info;
+        }
+        _moved.Clear();
+    }
+
+    private void UpdateStripCovered()
+    {
+        bool covered = ComputeStripCovered();
+        if (covered == _stripCovered) return;
+        _stripCovered = covered;
+        Log(covered ? "strip covered by the active stage" : "strip uncovered");
+        RaiseChanged();
+    }
+
+    private bool ComputeStripCovered()
+    {
+        if (ActiveStage == null) return false;
+        var strip = StageLayout.StripArea(_ws.GetPrimaryWorkArea(), Layout);
+        foreach (var id in ActiveStage.Windows)
+        {
+            if (!_windows.TryGetValue(id, out var w) || w.Info.IsMinimized) continue;
+            if (w.Info.IsMaximized || w.Info.Bounds.IntersectsWith(strip)) return true;
+        }
+        return false;
     }
 
     private void ProcessPending()
@@ -570,6 +614,9 @@ public sealed class StageEngine
             case WindowEventKind.MinimizeEnded: OnMinimizeEnded(e.Window); break;
             case WindowEventKind.MoveSizeStarted: OnMoveSizeStarted(e.Window); break;
             case WindowEventKind.MoveSizeEnded: OnMoveSizeEnded(e.Window); break;
+            case WindowEventKind.LocationChanged:
+                if (_windows.ContainsKey(e.Window)) _moved.Add(e.Window); // looked at on the next tick
+                break;
         }
     }
 
@@ -767,6 +814,7 @@ public sealed class StageEngine
         _settling.Remove(id);
         _transitionRestore.Remove(id);
         _review.Remove(id);
+        _moved.Remove(id);
         if (_userDragging == id)
         {
             _userDragging = null;
@@ -962,6 +1010,8 @@ public sealed class StageEngine
         _settling.Clear();
         _transitionRestore.Clear();
         _review.Clear();
+        _moved.Clear();
+        _stripCovered = false;
         _pendingSwap = null;
         _userDragging = null;
     }

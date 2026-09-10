@@ -395,14 +395,35 @@ public class StageEngineTests
     }
 
     [Fact]
-    public void WindowThatBecomesUnmanageable_IsRemoved()
+    public void WindowThatIsTemporarilyUnmanageable_IsKeptUntilItIsDestroyed()
     {
         var (ws, engine, _, _, _, b) = CreateEnabled();
 
-        ws.Remove(b); // GetWindowInfo now returns null
+        ws.Remove(b); // GetWindowInfo now returns null, as for a cloaked window
         engine.OnWindowEvent(new WindowEvent(WindowEventKind.TitleChanged, b));
+        Assert.Equal(2, engine.Stages.Count);
 
+        engine.OnWindowEvent(new WindowEvent(WindowEventKind.Destroyed, b));
         Assert.Single(engine.Stages);
+    }
+
+    [Fact]
+    public void SwitchingVirtualDesktops_KeepsStagesAndParkedWindows()
+    {
+        var (ws, engine, _, a1, a2, b) = CreateEnabled();
+        var stageA = engine.ActiveStage!;
+
+        // The shell cloaks every window on the desktop we are leaving.
+        foreach (var id in new[] { a1, a2, b })
+            engine.OnWindowEvent(new WindowEvent(WindowEventKind.Cloaked, id));
+
+        Assert.Equal(2, engine.Stages.Count);
+        Assert.Same(stageA, engine.ActiveStage);
+        Assert.True(engine.GetWindow(b)!.ParkedByUs);
+        Assert.Equal(new[] { b }, engine.ParkedByUs);
+
+        engine.Disable();
+        Assert.False(ws.IsMinimized(b)); // still restored when Stage Manager is turned off
     }
 
     // ---------------------------------------------------------------- settling (apps that move themselves)
@@ -489,6 +510,189 @@ public class StageEngineTests
         engine.Tick();
 
         Assert.DoesNotContain(ws.Ops, op => op.StartsWith($"move {c.Value} "));
+    }
+
+    // ---------------------------------------------------------------- swaps in two halves
+
+    private static bool TouchesWindows(string op)
+        => op.StartsWith("min ") || op.StartsWith("restore ") || op.StartsWith("move ") || op.StartsWith("activate ");
+
+    [Fact]
+    public void PrepareSwap_DescribesBothSides_WithoutTouchingWindows()
+    {
+        var (ws, engine, _, a1, a2, b) = CreateEnabled();
+        var stageA = engine.ActiveStage!;
+        ws.Ops.Clear();
+
+        var swap = engine.PrepareSwap(engine.Stages[1]);
+
+        Assert.NotNull(swap);
+        Assert.Same(stageA, swap.From);
+        Assert.Equal(new[] { a1, a2 }, swap.Outgoing.Select(o => o.Id));
+        Assert.True(swap.Outgoing[0].IsPrimary);
+        Assert.All(swap.Outgoing, o => Assert.NotNull(o.Snapshot));
+        var incoming = Assert.Single(swap.Incoming);
+        Assert.Equal(b, incoming.Id);
+        Assert.True(incoming.IsPrimary);
+        Assert.Equal(RectPx.FromSize(12 + (1696 - 800) / 2, 12 + (1016 - 600) / 2, 800, 600), incoming.Bounds);
+
+        Assert.DoesNotContain(ws.Ops, TouchesWindows);
+        Assert.Same(stageA, engine.ActiveStage);
+        Assert.False(ws.IsMinimized(a1));
+        Assert.True(ws.IsMinimized(b));
+    }
+
+    [Fact]
+    public void Prefetch_CapturesOnlyStalePictures_AndPrepareSwapReusesFreshOnes()
+    {
+        var (ws, engine, clock, _, _, _) = CreateEnabled(); // a1 and a2 are visible, b is parked
+        int baseline = ws.CaptureCount;
+
+        engine.PrefetchActiveSnapshots(TimeSpan.FromMilliseconds(300));
+        Assert.Equal(baseline + 2, ws.CaptureCount);
+
+        engine.PrefetchActiveSnapshots(TimeSpan.FromMilliseconds(300)); // still fresh
+        Assert.Equal(baseline + 2, ws.CaptureCount);
+
+        clock.Advance(TimeSpan.FromMilliseconds(400));
+        engine.PrefetchActiveSnapshots(TimeSpan.FromMilliseconds(300)); // stale again
+        Assert.Equal(baseline + 4, ws.CaptureCount);
+
+        clock.Advance(TimeSpan.FromMilliseconds(100));
+        var swap = engine.PrepareSwap(engine.Stages[1])!; // pictures are 100ms old: reused
+        Assert.Equal(baseline + 4, ws.CaptureCount);
+        Assert.All(swap.Outgoing, o => Assert.NotNull(o.Snapshot));
+    }
+
+    [Fact]
+    public void PrepareSwap_RetakesOldPictures()
+    {
+        var (ws, engine, clock, _, _, _) = CreateEnabled();
+        engine.PrefetchActiveSnapshots(TimeSpan.FromMilliseconds(300));
+        int afterPrefetch = ws.CaptureCount;
+
+        clock.Advance(TimeSpan.FromSeconds(2));
+        engine.PrepareSwap(engine.Stages[1]);
+
+        Assert.Equal(afterPrefetch + 2, ws.CaptureCount);
+    }
+
+    [Fact]
+    public void PrepareSwap_ReturnsNull_ForTheActiveStage()
+    {
+        var (_, engine, _, _, _, _) = CreateEnabled();
+        Assert.Null(engine.PrepareSwap(engine.ActiveStage!));
+    }
+
+    [Fact]
+    public void CommitPark_ThenCommitPresent_SwapsStages_AndTogglesTransitions()
+    {
+        var (ws, engine, _, a1, a2, b) = CreateEnabled();
+        var stageB = engine.Stages[1];
+        var swap = engine.PrepareSwap(stageB, suppressTransitions: true)!;
+
+        engine.CommitPark(swap);
+        Assert.True(swap.IsParked);
+        Assert.Same(stageB, engine.ActiveStage);
+        Assert.True(ws.IsMinimized(a1));
+        Assert.True(ws.IsMinimized(a2));
+        Assert.True(ws.IsMinimized(b)); // not restored yet
+        Assert.Contains($"transitions {a1.Value} off", ws.Ops);
+
+        engine.CommitPresent(swap);
+        Assert.True(swap.IsPresented);
+        Assert.False(ws.IsMinimized(b));
+        Assert.Equal(b, ws.Foreground);
+        Assert.Equal(swap.Incoming[0].Bounds, ws.BoundsOf(b));
+        Assert.Same(stageB, engine.Stages[0]);
+        Assert.Contains($"transitions {a1.Value} on", ws.Ops);
+        Assert.Contains($"transitions {b.Value} off", ws.Ops);
+        Assert.Contains($"transitions {b.Value} on", ws.Ops);
+    }
+
+    [Fact]
+    public void ActivateStage_LeavesTransitionsAlone()
+    {
+        var (ws, engine, _, _, _, _) = CreateEnabled();
+        engine.ActivateStage(engine.Stages[1]);
+        Assert.DoesNotContain(ws.Ops, op => op.StartsWith("transitions"));
+    }
+
+    [Fact]
+    public void CommittingTwice_DoesNothing()
+    {
+        var (ws, engine, _, _, _, _) = CreateEnabled();
+        var swap = engine.PrepareSwap(engine.Stages[1])!;
+        engine.CommitPresent(swap);
+        ws.Ops.Clear();
+
+        engine.CommitPark(swap);
+        engine.CommitPresent(swap);
+
+        Assert.Empty(ws.Ops);
+    }
+
+    [Fact]
+    public void PendingSwap_IsFinished_WhenTheUserSwitchesElsewhereMidway()
+    {
+        var (ws, engine, _) = Create();
+        var a = ws.Add("A", 1);
+        var b = ws.Add("B", 2);
+        var c = ws.Add("C", 3);
+        ws.Foreground = a;
+        engine.Enable();
+        var stageB = engine.Stages.First(s => s.ProcessId == 2);
+        var stageC = engine.Stages.First(s => s.ProcessId == 3);
+        var swap = engine.PrepareSwap(stageB, suppressTransitions: true)!;
+        engine.CommitPark(swap); // the animation would be running now
+
+        ws.Windows[c].Minimized = false;
+        ws.Foreground = c;
+        engine.OnWindowEvent(new WindowEvent(WindowEventKind.Foreground, c));
+
+        Assert.True(swap.IsPresented);
+        Assert.Same(stageC, engine.ActiveStage);
+        Assert.True(ws.IsMinimized(a));
+        Assert.True(ws.IsMinimized(b)); // presented and parked again in one go
+        Assert.Equal(new[] { stageC, stageB }, engine.Stages.Take(2));
+
+        ws.Ops.Clear();
+        engine.CommitPresent(swap); // the animation ends later; nothing more happens
+        Assert.Empty(ws.Ops);
+    }
+
+    [Fact]
+    public void Swap_ForWindowMinimizedBeforeEnable_PlansFromItsRestoreRectangle()
+    {
+        var (ws, engine, _) = Create();
+        var a = ws.Add("A", 1);
+        var b = ws.Add("B", 2, new RectPx(-32000, -32000, -31840, -31972), minimized: true);
+        ws.Windows[b].BoundsWhenRestored = new RectPx(100, 100, 1100, 800);
+        ws.Foreground = a;
+        engine.Enable();
+
+        var swap = engine.PrepareSwap(engine.Stages.First(s => s.ProcessId == 2))!;
+        var expected = RectPx.FromSize(12 + (1696 - 1000) / 2, 12 + (1016 - 700) / 2, 1000, 700);
+        Assert.Equal(expected, swap.Incoming[0].Bounds);
+
+        engine.CommitPresent(swap);
+        Assert.Equal(expected, ws.BoundsOf(b));
+    }
+
+    [Fact]
+    public void Disable_DuringSwap_MakesLaterCommitsNoOps()
+    {
+        var (ws, engine, _, a1, _, b) = CreateEnabled();
+        var swap = engine.PrepareSwap(engine.Stages[1], suppressTransitions: true)!;
+        engine.CommitPark(swap);
+
+        engine.Disable();
+        Assert.False(ws.IsMinimized(a1));
+        Assert.False(ws.IsMinimized(b));
+        ws.Ops.Clear();
+
+        engine.CommitPresent(swap);
+        Assert.Empty(ws.Ops);
     }
 
     [Fact]

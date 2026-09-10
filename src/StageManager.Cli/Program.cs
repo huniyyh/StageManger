@@ -128,14 +128,16 @@ sealed class DryRunWindowSystem : IWindowSystem
 
     public WindowId? GetForegroundWindow() => _real.GetForegroundWindow();
     public RectPx GetPrimaryWorkArea() => _real.GetPrimaryWorkArea();
+    public RectPx? GetRestoredBounds(WindowId id) => _real.GetRestoredBounds(id);
+    public void SetTransitionsEnabled(WindowId id, bool enabled) => Ops.Add($"transitions {Describe(id)} {(enabled ? "on" : "off")}");
     public void Minimize(WindowId id) { _pretendMinimized.Add(id); Ops.Add($"minimize {Describe(id)}"); }
     public void RestoreNoActivate(WindowId id) { _pretendMinimized.Remove(id); Ops.Add($"restore  {Describe(id)}"); }
     public void SetBounds(WindowId id, RectPx bounds) { _pretendBounds[id] = bounds; Ops.Add($"move     {Describe(id)} -> {bounds}"); }
     public bool Activate(WindowId id) { Ops.Add($"activate {Describe(id)}"); return true; }
 
-    public Snapshot? CaptureSnapshot(WindowId id, int maxWidth, int maxHeight)
+    public Snapshot? CaptureSnapshot(WindowId id, int maxWidth, int maxHeight, bool fromScreen = false)
     {
-        var snap = _real.CaptureSnapshot(id, maxWidth, maxHeight);
+        var snap = _real.CaptureSnapshot(id, maxWidth, maxHeight, fromScreen);
         Ops.Add($"snapshot {Describe(id)} -> {(snap == null ? "failed" : $"{snap.Width}x{snap.Height}")}");
         return snap;
     }

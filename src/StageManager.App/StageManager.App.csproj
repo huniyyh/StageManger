@@ -11,8 +11,9 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- WinForms is only used for the tray icon; keep its namespace out of every other file. -->
+    <!-- WinForms is only used for the tray icon; keep its namespaces out of every other file. -->
     <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
   </ItemGroup>
 
   <ItemGroup>

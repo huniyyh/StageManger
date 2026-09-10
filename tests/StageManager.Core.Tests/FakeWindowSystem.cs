@@ -16,6 +16,7 @@ internal sealed class FakeWindowSystem : IWindowSystem
 
         public void Restore()
         {
+            if (!Minimized) return; // activating a visible window does not move it
             Minimized = false;
             if (BoundsWhenRestored is { } b) Bounds = b;
         }
@@ -62,6 +63,11 @@ internal sealed class FakeWindowSystem : IWindowSystem
     public WindowId? GetForegroundWindow() => Foreground;
     public RectPx GetPrimaryWorkArea() => WorkArea;
 
+    public RectPx? GetRestoredBounds(WindowId id)
+        => Windows.TryGetValue(id, out var w) ? (w.Minimized ? w.BoundsWhenRestored ?? w.Bounds : w.Bounds) : null;
+
+    public void SetTransitionsEnabled(WindowId id, bool enabled) => Ops.Add($"transitions {id.Value} {(enabled ? "on" : "off")}");
+
     public void Minimize(WindowId id) { Windows[id].Minimized = true; Ops.Add($"min {id.Value}"); }
     public void RestoreNoActivate(WindowId id) { Windows[id].Restore(); Ops.Add($"restore {id.Value}"); }
     public void SetBounds(WindowId id, RectPx b) { Windows[id].Bounds = b; Ops.Add($"move {id.Value} {b}"); }
@@ -74,8 +80,14 @@ internal sealed class FakeWindowSystem : IWindowSystem
         return true;
     }
 
-    public Snapshot? CaptureSnapshot(WindowId id, int maxWidth, int maxHeight)
-        => Windows[id].Minimized ? null : new Snapshot(1, 1, new byte[4], DateTimeOffset.UnixEpoch);
+    public int CaptureCount { get; private set; }
+
+    public Snapshot? CaptureSnapshot(WindowId id, int maxWidth, int maxHeight, bool fromScreen = false)
+    {
+        if (Windows[id].Minimized) return null;
+        CaptureCount++;
+        return new Snapshot(1, 1, new byte[4], DateTimeOffset.UnixEpoch);
+    }
 }
 
 internal sealed class FakeClock

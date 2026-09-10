@@ -11,6 +11,7 @@ GetWindowLongPtr
 SetWindowLongPtr
 GetAncestor
 GetWindowRect
+GetWindowPlacement
 GetWindowThreadProcessId
 GetForegroundWindow
 SetForegroundWindow
@@ -20,6 +21,7 @@ keybd_event
 
 // DWM
 DwmGetWindowAttribute
+DwmSetWindowAttribute
 
 // WinEvent hooks and message pump
 SetWinEventHook
@@ -47,6 +49,9 @@ SelectObject
 DeleteObject
 DeleteDC
 BitBlt
+StretchBlt
+SetStretchBltMode
+SetBrushOrgEx
 
 // Hotkeys
 RegisterHotKey

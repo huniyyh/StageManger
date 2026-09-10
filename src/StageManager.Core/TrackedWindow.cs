@@ -6,6 +6,9 @@ public sealed class TrackedWindow
     public WindowInfo Info { get; internal set; }
     public Snapshot? Snapshot { get; internal set; }
 
+    /// <summary>When <see cref="Snapshot"/> was taken, on the engine's clock.</summary>
+    public DateTimeOffset? SnapshotTakenAt { get; internal set; }
+
     /// <summary>Bounds before the engine touched the window; restored on Disable.</summary>
     public RectPx? OriginalBounds { get; internal set; }
 

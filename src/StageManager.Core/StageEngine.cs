@@ -7,8 +7,8 @@ namespace StageManager.Core;
 /// </summary>
 public sealed class StageEngine
 {
-    public const int SnapshotMaxWidth = 480;
-    public const int SnapshotMaxHeight = 320;
+    public const int SnapshotMaxWidth = 800;
+    public const int SnapshotMaxHeight = 600;
 
     /// <summary>How long a newly shown background window may wait to become foreground before it is parked.</summary>
     public static readonly TimeSpan PendingDelay = TimeSpan.FromMilliseconds(400);
@@ -19,6 +19,9 @@ public sealed class StageEngine
     /// <summary>How many times a self-moving window is put back before we give up.</summary>
     public const int MaxSettleAttempts = 2;
 
+    /// <summary>A snapshot of a visible window younger than this is reused by <see cref="PrepareSwap"/> instead of being retaken.</summary>
+    public static readonly TimeSpan SnapshotFreshness = TimeSpan.FromMilliseconds(600);
+
     private readonly IWindowSystem _ws;
     private readonly Func<DateTimeOffset> _clock;
     private readonly Action<string>? _log;
@@ -26,6 +29,7 @@ public sealed class StageEngine
     private readonly Dictionary<WindowId, TrackedWindow> _windows = new();
     private readonly Dictionary<WindowId, DateTimeOffset> _pending = new();
     private readonly Dictionary<WindowId, (DateTimeOffset Due, int Attempts)> _settling = new();
+    private StageSwap? _pendingSwap;
 
     public LayoutSettings Layout { get; set; }
     public bool IsEnabled { get; private set; }
@@ -83,7 +87,7 @@ public sealed class StageEngine
         {
             if (fg is { } f2 && active.Windows.Contains(f2)) active.Primary = f2;
             ActiveStage = active;
-            Present(active, activate: false);
+            ApplyPresentation(active, PlanPresentation(active), activate: false, suppressTransitions: false);
             MoveToFront(active);
         }
 
@@ -112,23 +116,116 @@ public sealed class StageEngine
         RaiseChanged();
     }
 
-    /// <summary>Brings a stage to the center; the previously active stage is parked.</summary>
+    /// <summary>Brings a stage to the center immediately; the previously active stage is parked.</summary>
     public void ActivateStage(Stage stage)
     {
         if (!IsEnabled || !_stages.Contains(stage)) return;
         if (stage == ActiveStage)
         {
+            FinishPendingSwap();
             if (stage.Primary is { } p) _ws.Activate(p);
             return;
         }
 
+        var swap = PrepareSwap(stage);
+        if (swap == null) return;
         Log($"activate {stage}");
-        var previous = ActiveStage;
-        ActiveStage = stage;
-        if (previous != null) Park(previous);
-        Present(stage, activate: true);
-        MoveToFront(stage);
+        CommitPresent(swap);
+    }
+
+    // ---------------------------------------------------------------- swaps in two halves
+
+    /// <summary>
+    /// Plans a switch to <paramref name="to"/> without touching any window: takes fresh snapshots of the outgoing
+    /// windows and computes where the incoming ones will go. Returns null when there is nothing to switch.
+    /// Any swap still pending is finished first.
+    /// </summary>
+    public StageSwap? PrepareSwap(Stage to, bool suppressTransitions = false)
+    {
+        if (!IsEnabled || !_stages.Contains(to) || to == ActiveStage) return null;
+        FinishPendingSwap();
+
+        var from = ActiveStage;
+        var outgoing = new List<SwapWindow>();
+        if (from != null)
+        {
+            foreach (var id in from.Windows)
+            {
+                if (!_windows.TryGetValue(id, out var w)) continue;
+                var info = _ws.GetWindowInfo(id);
+                if (info == null || info.IsMinimized) continue;
+                w.Info = info;
+                // The outgoing windows are on screen right now, so a screen copy is exact; a fresh prefetched one is reused.
+                if (!IsFresh(w, SnapshotFreshness)) CaptureInto(w, fromScreen: true);
+                outgoing.Add(new SwapWindow(id, info.Bounds, w.Snapshot, id == from.Primary));
+            }
+        }
+
+        var plan = PlanPresentation(to);
+        var primary = ResolvePrimary(to);
+        var incoming = plan
+            .Select(p => new SwapWindow(p.Id, p.Bounds, _windows.GetValueOrDefault(p.Id)?.Snapshot, p.Id == primary))
+            .ToList();
+
+        _pendingSwap = new StageSwap(from, to, outgoing, incoming, plan, suppressTransitions);
+        Log($"swap {from?.ToString() ?? "none"} -> {to}: {outgoing.Count} out, {incoming.Count} in");
+        return _pendingSwap;
+    }
+
+    /// <summary>First half of a swap: the outgoing stage is parked and <see cref="ActiveStage"/> becomes the target.</summary>
+    public void CommitPark(StageSwap swap)
+    {
+        if (!IsCurrent(swap) || swap.IsParked) return;
+        swap.IsParked = true;
+        ActiveStage = swap.To;
+        if (swap.From != null) Park(swap.From, captureSnapshots: false, swap.SuppressTransitions);
+    }
+
+    /// <summary>Second half of a swap: the incoming stage is restored, laid out and focused. Parks first if needed.</summary>
+    public void CommitPresent(StageSwap swap)
+    {
+        if (!IsCurrent(swap)) return;
+        CommitPark(swap);
+        swap.IsPresented = true;
+        _pendingSwap = null;
+
+        ApplyPresentation(swap.To, swap.Plan, activate: true, swap.SuppressTransitions);
+        if (swap.SuppressTransitions)
+            foreach (var o in swap.Outgoing) _ws.SetTransitionsEnabled(o.Id, true);
+        MoveToFront(swap.To);
         RaiseChanged();
+    }
+
+    /// <summary>
+    /// Takes pictures of the active stage's visible windows ahead of a likely swap, so the swap itself does not
+    /// have to wait for a capture. Call it when the pointer enters the strip. Cheap when the pictures are recent.
+    /// </summary>
+    public void PrefetchActiveSnapshots(TimeSpan maxAge)
+    {
+        if (!IsEnabled || ActiveStage == null) return;
+        foreach (var id in ActiveStage.Windows)
+        {
+            if (!_windows.TryGetValue(id, out var w) || w.Info.IsMinimized || IsFresh(w, maxAge)) continue;
+            CaptureInto(w, fromScreen: true);
+        }
+    }
+
+    private bool IsFresh(TrackedWindow w, TimeSpan maxAge)
+        => w.Snapshot != null && w.SnapshotTakenAt is { } at && _clock() - at < maxAge;
+
+    private void CaptureInto(TrackedWindow w, bool fromScreen)
+    {
+        var snap = _ws.CaptureSnapshot(w.Info.Id, SnapshotMaxWidth, SnapshotMaxHeight, fromScreen);
+        if (snap == null) return;
+        w.Snapshot = snap;
+        w.SnapshotTakenAt = _clock();
+    }
+
+    private bool IsCurrent(StageSwap swap) => IsEnabled && ReferenceEquals(_pendingSwap, swap);
+
+    private void FinishPendingSwap()
+    {
+        if (_pendingSwap is { } swap) CommitPresent(swap);
     }
 
     /// <summary>
@@ -198,8 +295,8 @@ public sealed class StageEngine
             case WindowEventKind.Uncloaked:
             case WindowEventKind.TitleChanged: OnShownOrChanged(e.Window); break;
             case WindowEventKind.Hidden:
-            case WindowEventKind.Cloaked:
             case WindowEventKind.Destroyed: RemoveWindow(e.Window); break;
+            case WindowEventKind.Cloaked: break; // another virtual desktop is showing; the window and its stage live on
             case WindowEventKind.MinimizeStarted: OnMinimizeStarted(e.Window); break;
             case WindowEventKind.MinimizeEnded: OnMinimizeEnded(e.Window); break;
             case WindowEventKind.MoveSizeEnded: OnMoveSizeEnded(e.Window); break;
@@ -230,11 +327,9 @@ public sealed class StageEngine
     private void OnShownOrChanged(WindowId id)
     {
         var info = _ws.GetWindowInfo(id);
-        if (info == null)
-        {
-            if (_windows.ContainsKey(id)) RemoveWindow(id);
-            return;
-        }
+        // A known window that is not manageable right now is usually just cloaked on another virtual desktop;
+        // it is removed when it is hidden or destroyed, not here.
+        if (info == null) return;
 
         if (_windows.TryGetValue(id, out var w))
         {
@@ -256,8 +351,8 @@ public sealed class StageEngine
 
         // The user minimized the window: it goes to the strip, on its own if it left a multi-window stage.
         _pending.Remove(id);
-        var snap = _ws.CaptureSnapshot(id, SnapshotMaxWidth, SnapshotMaxHeight);
-        if (snap != null) w.Snapshot = snap;
+        _settling.Remove(id);
+        CaptureInto(w, fromScreen: false);
         w.StageBounds ??= w.Info.Bounds;
         w.Info = w.Info with { IsMinimized = true };
 
@@ -287,7 +382,7 @@ public sealed class StageEngine
         var stage = FindStageOf(id);
         if (stage == null) return;
         w.Info = w.Info with { IsMinimized = false };
-        if (stage == ActiveStage) return; // restored by Present, or already handled by OnForeground
+        if (stage == ActiveStage) return; // restored by us, or already handled by OnForeground
 
         // The user restored a parked window from the taskbar.
         w.ParkedByUs = false;
@@ -359,12 +454,12 @@ public sealed class StageEngine
         RaiseChanged();
     }
 
-    private void Park(Stage stage)
+    private void Park(Stage stage, bool captureSnapshots = true, bool suppressTransitions = false)
     {
-        foreach (var id in stage.Windows.ToArray()) ParkWindow(id);
+        foreach (var id in stage.Windows.ToArray()) ParkWindow(id, captureSnapshots, suppressTransitions);
     }
 
-    private void ParkWindow(WindowId id)
+    private void ParkWindow(WindowId id, bool captureSnapshot = true, bool suppressTransitions = false)
     {
         if (!_windows.TryGetValue(id, out var w)) return;
         var info = _ws.GetWindowInfo(id);
@@ -374,64 +469,114 @@ public sealed class StageEngine
         if (info.IsMinimized) return;
 
         w.StageBounds = info.Bounds;
-        var snap = _ws.CaptureSnapshot(id, SnapshotMaxWidth, SnapshotMaxHeight);
-        if (snap != null) w.Snapshot = snap;
+        if (captureSnapshot) CaptureInto(w, fromScreen: false);
+        if (suppressTransitions) _ws.SetTransitionsEnabled(id, false);
         w.ParkedByUs = true; // set before minimizing so the resulting event is recognised as ours
         _ws.Minimize(id);
         w.Info = info with { IsMinimized = true };
     }
 
-    private void Present(Stage stage, bool activate)
+    /// <summary>Decides where each window of a stage goes when the stage is shown, without moving anything.</summary>
+    private List<PlannedPlacement> PlanPresentation(Stage stage)
     {
-        var available = StageLayout.AvailableArea(_ws.GetPrimaryWorkArea(), Layout);
+        var workArea = _ws.GetPrimaryWorkArea();
+        var available = StageLayout.AvailableArea(workArea, Layout);
         bool single = stage.Windows.Count == 1;
+        var plan = new List<PlannedPlacement>();
 
-        foreach (var id in stage.Windows.ToArray())
+        foreach (var id in stage.Windows)
         {
             if (!_windows.TryGetValue(id, out var w)) continue;
             var info = _ws.GetWindowInfo(id);
             if (info == null) continue;
+            if (info.IsMaximized)
+            {
+                plan.Add(new PlannedPlacement(id, workArea, Apply: false));
+                continue;
+            }
 
+            var current = info.IsMinimized ? _ws.GetRestoredBounds(id) ?? info.Bounds : info.Bounds;
+            var source = w.StageBounds ?? current;
+            bool center = single && !w.Presented;
+            plan.Add(new PlannedPlacement(id, StageLayout.Place(source, available, center), Apply: true));
+        }
+        return plan;
+    }
+
+    private void ApplyPresentation(Stage stage, IReadOnlyList<PlannedPlacement> plan, bool activate, bool suppressTransitions)
+    {
+        foreach (var p in plan)
+        {
+            if (!_windows.TryGetValue(p.Id, out var w)) continue;
+            var info = _ws.GetWindowInfo(p.Id);
+            if (info == null) continue;
+
+            if (suppressTransitions) _ws.SetTransitionsEnabled(p.Id, false);
             if (info.IsMinimized)
             {
-                _ws.RestoreNoActivate(id);
+                _ws.RestoreNoActivate(p.Id);
                 w.ParkedByUs = false;
-                info = _ws.GetWindowInfo(id) ?? (info with { IsMinimized = false });
+                info = _ws.GetWindowInfo(p.Id) ?? (info with { IsMinimized = false });
             }
             w.OriginalBounds ??= info.Bounds; // first time we see it un-minimized
-            PlaceWindow(w, info, available, center: single && !w.Presented);
+
+            if (p.Apply && !info.IsMaximized) ApplyBounds(w, info, p.Bounds);
+            else MarkPresented(w, info);
         }
 
-        if (!activate) return;
-        var primary = stage.Primary is { } p && stage.Windows.Contains(p) ? p : stage.Windows.FirstOrDefault();
-        if (primary == default) return;
-        _ws.Activate(primary);
-        stage.Primary = primary;
+        if (activate)
+        {
+            var primary = ResolvePrimary(stage);
+            if (primary is { } id)
+            {
+                _ws.Activate(id);
+                stage.Primary = id;
+            }
+        }
+
+        if (suppressTransitions)
+            foreach (var p in plan) _ws.SetTransitionsEnabled(p.Id, true);
     }
 
     /// <param name="source">Bounds to fit into the area; defaults to the remembered stage bounds, or the current bounds on first placement.</param>
     private void PlaceWindow(TrackedWindow w, WindowInfo info, RectPx available, bool center, RectPx? source = null)
     {
-        if (!info.IsMaximized)
+        if (info.IsMaximized)
         {
-            var from = source ?? (w.Presented && w.StageBounds is { } remembered ? remembered : info.Bounds);
-            var target = StageLayout.Place(from, available, center);
-            if (target != info.Bounds)
-            {
-                _ws.SetBounds(info.Id, target);
-                w.MovedByUs = true;
-            }
-            w.StageBounds = target;
-            info = info with { Bounds = target };
-
-            // Some apps reposition themselves right after they appear; check back once they have had a moment.
-            if (!w.Presented) _settling[info.Id] = (_clock() + SettleDelay, 0);
+            MarkPresented(w, info);
+            return;
         }
+        var from = source ?? w.StageBounds ?? info.Bounds;
+        ApplyBounds(w, info, StageLayout.Place(from, available, center));
+    }
+
+    private void ApplyBounds(TrackedWindow w, WindowInfo info, RectPx target)
+    {
+        if (target != info.Bounds)
+        {
+            _ws.SetBounds(info.Id, target);
+            w.MovedByUs = true;
+        }
+        w.StageBounds = target;
+
+        // Some apps reposition themselves right after they appear; check back once they have had a moment.
+        if (!w.Presented) _settling[info.Id] = (_clock() + SettleDelay, 0);
+        MarkPresented(w, info with { Bounds = target });
+    }
+
+    private static void MarkPresented(TrackedWindow w, WindowInfo info)
+    {
         w.Presented = true;
         w.Info = info with { IsMinimized = false };
     }
 
     // ---------------------------------------------------------------- helpers
+
+    private static WindowId? ResolvePrimary(Stage stage)
+    {
+        if (stage.Primary is { } p && stage.Windows.Contains(p)) return p;
+        return stage.Windows.Count > 0 ? stage.Windows[0] : null;
+    }
 
     private Stage? FindStageByProcess(uint pid)
     {
@@ -459,6 +604,7 @@ public sealed class StageEngine
         _windows.Clear();
         _pending.Clear();
         _settling.Clear();
+        _pendingSwap = null;
         ActiveStage = null;
     }
 

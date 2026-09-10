@@ -80,9 +80,31 @@ public sealed unsafe class Win32WindowSystem : IWindowSystem, IDisposable
         return new RectPx(0, 0, 1920, 1080);
     }
 
+    public RectPx? GetRestoredBounds(WindowId id)
+    {
+        var hwnd = ToHwnd(id);
+        if (!PInvoke.IsIconic(hwnd))
+            return PInvoke.GetWindowRect(hwnd, out RECT current) ? ToRect(current) : null;
+
+        var placement = new WINDOWPLACEMENT { length = (uint)sizeof(WINDOWPLACEMENT) };
+        if (!PInvoke.GetWindowPlacement(hwnd, ref placement)) return null;
+
+        // rcNormalPosition is in workspace coordinates: relative to the work area origin, which differs from
+        // the screen origin when the taskbar sits at the top or the left.
+        var r = placement.rcNormalPosition;
+        var workArea = GetPrimaryWorkArea();
+        return new RectPx(r.left + workArea.Left, r.top + workArea.Top, r.right + workArea.Left, r.bottom + workArea.Top);
+    }
+
     // ---------------------------------------------------------------- commands
 
     public void Minimize(WindowId id) => PInvoke.ShowWindow(ToHwnd(id), SHOW_WINDOW_CMD.SW_SHOWMINNOACTIVE);
+
+    public void SetTransitionsEnabled(WindowId id, bool enabled)
+    {
+        int disabled = enabled ? 0 : 1;
+        PInvoke.DwmSetWindowAttribute(ToHwnd(id), DWMWINDOWATTRIBUTE.DWMWA_TRANSITIONS_FORCEDISABLED, &disabled, sizeof(int));
+    }
 
     public void RestoreNoActivate(WindowId id) => PInvoke.ShowWindow(ToHwnd(id), SHOW_WINDOW_CMD.SW_SHOWNOACTIVATE);
 
@@ -106,7 +128,7 @@ public sealed unsafe class Win32WindowSystem : IWindowSystem, IDisposable
 
     // ---------------------------------------------------------------- snapshot
 
-    public Snapshot? CaptureSnapshot(WindowId id, int maxWidth, int maxHeight)
+    public Snapshot? CaptureSnapshot(WindowId id, int maxWidth, int maxHeight, bool fromScreen = false)
     {
         var hwnd = ToHwnd(id);
         if (!PInvoke.IsWindow(hwnd) || PInvoke.IsIconic(hwnd)) return null;
@@ -142,14 +164,14 @@ public sealed unsafe class Win32WindowSystem : IWindowSystem, IDisposable
                 try
                 {
                     var previous = PInvoke.SelectObject(mem, bmp);
-                    bool ok = PInvoke.PrintWindow(hwnd, mem, (PRINT_WINDOW_FLAGS)PW_RENDERFULLCONTENT);
                     var pixels = new ReadOnlySpan<byte>(bits, w * h * 4);
+                    bool ok = !fromScreen && PInvoke.PrintWindow(hwnd, mem, (PRINT_WINDOW_FLAGS)PW_RENDERFULLCONTENT);
                     if (!ok || LooksBlank(pixels))
                     {
-                        // Fallback: copy what is on screen. Good enough for the foreground window we are about to park.
+                        // Copy what is on screen: exact for a visible window, and the fallback when PrintWindow gives nothing.
                         PInvoke.BitBlt(mem, 0, 0, w, h, screen, rc.left, rc.top, ROP_CODE.SRCCOPY);
                     }
-                    var snapshot = Downscale(pixels, w, crop, maxWidth, maxHeight);
+                    var snapshot = Shrink(screen, mem, w, h, crop, maxWidth, maxHeight);
                     PInvoke.SelectObject(mem, previous);
                     return snapshot;
                 }
@@ -168,44 +190,42 @@ public sealed unsafe class Win32WindowSystem : IWindowSystem, IDisposable
         return true;
     }
 
-    /// <summary>Box-filter downscale of a cropped region of a top-down BGRA32 bitmap.</summary>
-    private static Snapshot Downscale(ReadOnlySpan<byte> src, int srcWidth, RectPx crop, int maxWidth, int maxHeight)
+    /// <summary>Scales the cropped region of a captured bitmap down with GDI's halftone (box) filter and copies the pixels out.</summary>
+    private static Snapshot? Shrink(HDC screen, HDC source, int srcWidth, int srcHeight, RectPx crop, int maxWidth, int maxHeight)
     {
+        var insets = new Insets(crop.Left, crop.Top, srcWidth - crop.Right, srcHeight - crop.Bottom);
         int cw = crop.Width, ch = crop.Height;
         double scale = Math.Min(1.0, Math.Min((double)maxWidth / cw, (double)maxHeight / ch));
         int dw = Math.Max(1, (int)(cw * scale)), dh = Math.Max(1, (int)(ch * scale));
-        var dst = new byte[dw * dh * 4];
 
-        for (int y = 0; y < dh; y++)
+        var dc = PInvoke.CreateCompatibleDC(screen);
+        try
         {
-            int sy0 = crop.Top + y * ch / dh;
-            int sy1 = crop.Top + Math.Max(y * ch / dh + 1, (y + 1) * ch / dh);
-            for (int x = 0; x < dw; x++)
+            var bmi = new BITMAPINFO();
+            bmi.bmiHeader.biSize = (uint)sizeof(BITMAPINFOHEADER);
+            bmi.bmiHeader.biWidth = dw;
+            bmi.bmiHeader.biHeight = -dh; // top-down
+            bmi.bmiHeader.biPlanes = 1;
+            bmi.bmiHeader.biBitCount = 32;
+            void* bits = null;
+            var bmp = PInvoke.CreateDIBSection(screen, &bmi, DIB_USAGE.DIB_RGB_COLORS, &bits, HANDLE.Null, 0);
+            if (bmp.IsNull || bits == null) return null;
+            try
             {
-                int sx0 = crop.Left + x * cw / dw;
-                int sx1 = crop.Left + Math.Max(x * cw / dw + 1, (x + 1) * cw / dw);
-                long b = 0, g = 0, r = 0;
-                int n = 0;
-                for (int sy = sy0; sy < sy1; sy++)
-                {
-                    int row = sy * srcWidth * 4;
-                    for (int sx = sx0; sx < sx1; sx++)
-                    {
-                        int i = row + sx * 4;
-                        b += src[i];
-                        g += src[i + 1];
-                        r += src[i + 2];
-                        n++;
-                    }
-                }
-                int o = (y * dw + x) * 4;
-                dst[o] = (byte)(b / n);
-                dst[o + 1] = (byte)(g / n);
-                dst[o + 2] = (byte)(r / n);
-                dst[o + 3] = 255;
+                var previous = PInvoke.SelectObject(dc, bmp);
+                PInvoke.SetStretchBltMode(dc, STRETCH_BLT_MODE.HALFTONE);
+                PInvoke.SetBrushOrgEx(dc, 0, 0, null);
+                PInvoke.StretchBlt(dc, 0, 0, dw, dh, source, crop.Left, crop.Top, cw, ch, ROP_CODE.SRCCOPY);
+
+                var dst = new byte[dw * dh * 4];
+                new ReadOnlySpan<byte>(bits, dst.Length).CopyTo(dst);
+                for (int i = 3; i < dst.Length; i += 4) dst[i] = 255; // GDI leaves alpha undefined
+                PInvoke.SelectObject(dc, previous);
+                return new Snapshot(dw, dh, dst, DateTimeOffset.UtcNow, insets);
             }
+            finally { PInvoke.DeleteObject(bmp); }
         }
-        return new Snapshot(dw, dh, dst, DateTimeOffset.UtcNow);
+        finally { PInvoke.DeleteDC(dc); }
     }
 
     // ---------------------------------------------------------------- events

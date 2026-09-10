@@ -14,13 +14,23 @@ public interface IWindowSystem
     /// <summary>Work area of the primary monitor in physical pixels.</summary>
     RectPx GetPrimaryWorkArea();
 
+    /// <summary>The bounds a window will have once it is no longer minimized, or its current bounds when it is not minimized.</summary>
+    RectPx? GetRestoredBounds(WindowId id);
+
     void Minimize(WindowId id);
     void RestoreNoActivate(WindowId id);
     void SetBounds(WindowId id, RectPx bounds);
     bool Activate(WindowId id);
 
-    /// <summary>Captures a thumbnail of a non-minimized window. Returns null when nothing could be captured.</summary>
-    Snapshot? CaptureSnapshot(WindowId id, int maxWidth, int maxHeight);
+    /// <summary>Turns the OS minimize and restore animations of one window off or back on.</summary>
+    void SetTransitionsEnabled(WindowId id, bool enabled);
+
+    /// <summary>
+    /// Captures a thumbnail of a non-minimized window. Returns null when nothing could be captured.
+    /// With <paramref name="fromScreen"/> the pixels are copied straight off the screen, which is much faster
+    /// and exact for a window that is fully visible, but includes anything drawn over it.
+    /// </summary>
+    Snapshot? CaptureSnapshot(WindowId id, int maxWidth, int maxHeight, bool fromScreen = false);
 
     event Action<WindowEvent>? WindowChanged;
 }

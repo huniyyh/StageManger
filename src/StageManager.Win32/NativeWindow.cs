@@ -8,8 +8,10 @@ namespace StageManager.Win32;
 /// <summary>Small helpers for our own windows (the strip and the hotkey sink).</summary>
 public static class NativeWindow
 {
+    private const nint WS_EX_TRANSPARENT = 0x00000020;
     private const nint WS_EX_TOOLWINDOW = 0x00000080;
     private const nint WS_EX_NOACTIVATE = 0x08000000;
+    private static readonly HWND HWND_TOPMOST = new(-1);
 
     /// <summary>Keeps a window out of Alt-Tab and prevents clicks on it from stealing focus.</summary>
     public static void MakeNoActivateToolWindow(nint hwnd)
@@ -18,6 +20,19 @@ public static class NativeWindow
         nint exStyle = PInvoke.GetWindowLongPtr(h, WINDOW_LONG_PTR_INDEX.GWL_EXSTYLE);
         PInvoke.SetWindowLongPtr(h, WINDOW_LONG_PTR_INDEX.GWL_EXSTYLE, exStyle | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW);
     }
+
+    /// <summary>Lets all mouse input pass through a layered window to whatever is underneath.</summary>
+    public static void MakeClickThrough(nint hwnd)
+    {
+        var h = new HWND(hwnd);
+        nint exStyle = PInvoke.GetWindowLongPtr(h, WINDOW_LONG_PTR_INDEX.GWL_EXSTYLE);
+        PInvoke.SetWindowLongPtr(h, WINDOW_LONG_PTR_INDEX.GWL_EXSTYLE, exStyle | WS_EX_TRANSPARENT);
+    }
+
+    /// <summary>Puts a window at the top of the topmost band without activating it.</summary>
+    public static void RaiseTopmost(nint hwnd)
+        => PInvoke.SetWindowPos(new HWND(hwnd), HWND_TOPMOST, 0, 0, 0, 0,
+            SET_WINDOW_POS_FLAGS.SWP_NOMOVE | SET_WINDOW_POS_FLAGS.SWP_NOSIZE | SET_WINDOW_POS_FLAGS.SWP_NOACTIVATE);
 
     public static bool RegisterHotKey(nint hwnd, int id, bool ctrl, bool alt, bool shift, bool win, uint virtualKey)
     {

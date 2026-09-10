@@ -24,10 +24,28 @@ dotnet run --project src/StageManager.App
 ```
 
 앱은 트레이 아이콘만 띄운 채 꺼진 상태로 시작합니다. `Ctrl+Alt+S` 또는 트레이 아이콘 클릭으로 켜고 끕니다.
+한 번에 하나만 실행됩니다. 이미 실행 중일 때 다시 실행하면 새 인스턴스는 바로 종료되고 기존 인스턴스가 트레이 풍선으로 알려 주며, `--enable` 로 실행했다면 기존 인스턴스를 켭니다.
 끄면 최소화했던 창을 모두 복원하고 옮겼던 창을 원래 위치로 되돌립니다.
 `--enable` 인수를 주면 시작과 동시에 켜집니다.
 
 로그와 복구 파일은 `%LOCALAPPDATA%\StageManager\` 에 있습니다. 앱이 비정상 종료되면 다음 실행 때 `parked.json` 을 읽어 최소화된 창을 되돌립니다.
+
+## 설치 파일과 업데이트
+
+설치와 자동 업데이트는 Velopack 으로 처리합니다.
+
+```bash
+dotnet tool restore
+.\build\publish.ps1 -Version 0.1.0
+```
+
+`Releases\StageManager-win-Setup.exe` 가 설치 파일입니다. 사용자별로 `%LocalAppData%\StageManager` 에 설치되어 관리자 권한이 필요 없고, .NET 10 데스크톱 런타임이 없으면 설치 프로그램이 받아 줍니다.
+
+업데이트는 GitHub Releases 를 서버로 씁니다. 앱은 시작 30초 뒤와 6시간마다 새 릴리스를 확인해 조용히 내려받고, 트레이 풍선과 메뉴로 알립니다. 적용을 누르면 Stage Manager 를 끄고 창을 모두 되돌린 뒤 재시작합니다. 트레이 메뉴의 "업데이트 확인" 으로 바로 확인할 수도 있습니다. `dotnet run` 이나 bin 폴더에서 실행한 개발 빌드는 확인을 건너뜁니다.
+
+릴리스 절차는 태그 하나입니다. `v0.2.0` 처럼 태그를 푸시하면 GitHub Actions 가 테스트, 게시, 패키징을 거쳐 https://github.com/huniyyh/StageManger/releases 에 올립니다. 앱이 바라보는 저장소 주소는 [StageManager.App.csproj](src/StageManager.App/StageManager.App.csproj) 의 `UpdateRepository` 값입니다.
+
+서명하지 않은 설치 파일은 처음 실행 시 SmartScreen 경고가 뜹니다. 코드 서명 인증서가 생기면 `vpk pack` 에 `--signParams` 를 추가하면 됩니다.
 
 ## 진단 CLI
 

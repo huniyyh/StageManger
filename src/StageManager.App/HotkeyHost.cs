@@ -3,9 +3,18 @@ using StageManager.Win32;
 
 namespace StageManager.App;
 
-/// <summary>Owns a message-only window that receives the global toggle hotkey (Ctrl+Alt+S).</summary>
+/// <summary>
+/// Owns a message-only window that receives the global toggle hotkey (Ctrl+Alt+S) and messages from
+/// other instances of the app that were started while this one is running.
+/// </summary>
 internal sealed class HotkeyHost : IDisposable
 {
+    /// <summary>Title of the message-only window; a second instance looks it up to talk to the first.</summary>
+    public const string WindowTitle = "StageManager.Hotkey";
+
+    /// <summary>Sent by a second instance before it exits. wParam is 1 when it was started with --enable.</summary>
+    public const uint WM_ANOTHER_INSTANCE = 0x8000 + 1; // WM_APP + 1
+
     private const int HotkeyId = 0x5347;
     private const int WM_HOTKEY = 0x0312;
     private static readonly IntPtr HWND_MESSAGE = new(-3);
@@ -13,11 +22,15 @@ internal sealed class HotkeyHost : IDisposable
     private readonly HwndSource _source;
 
     public event Action? Pressed;
+
+    /// <summary>Another instance was launched; the argument says whether it asked to enable Stage Manager.</summary>
+    public event Action<bool>? AnotherInstanceStarted;
+
     public bool Registered { get; }
 
     public HotkeyHost()
     {
-        var parameters = new HwndSourceParameters("StageManager.Hotkey")
+        var parameters = new HwndSourceParameters(WindowTitle)
         {
             Width = 0,
             Height = 0,
@@ -35,6 +48,11 @@ internal sealed class HotkeyHost : IDisposable
         if (msg == WM_HOTKEY && wParam.ToInt32() == HotkeyId)
         {
             Pressed?.Invoke();
+            handled = true;
+        }
+        else if (msg == WM_ANOTHER_INSTANCE)
+        {
+            AnotherInstanceStarted?.Invoke(wParam != IntPtr.Zero);
             handled = true;
         }
         return IntPtr.Zero;

@@ -1,0 +1,41 @@
+name: Release
+
+# Push a tag like v0.2.0 to build the installer and publish it as a GitHub Release.
+# The app checks that release feed for updates.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Version from tag
+        shell: pwsh
+        run: '"VERSION=$($env:GITHUB_REF_NAME.TrimStart(''v''))" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV'
+
+      - name: Restore tools
+        run: dotnet tool restore
+
+      - name: Test
+        run: dotnet test tests/StageManager.Core.Tests -c Release -nologo
+
+      - name: Fetch previous release for delta packages
+        continue-on-error: true
+        run: dotnet vpk download github --repoUrl https://github.com/${{ github.repository }} --token ${{ secrets.GITHUB_TOKEN }} --outputDir Releases
+
+      - name: Publish and pack
+        shell: pwsh
+        run: ./build/publish.ps1 -Version $env:VERSION
+
+      - name: Upload to GitHub Releases
+        run: dotnet vpk upload github --repoUrl https://github.com/${{ github.repository }} --token ${{ secrets.GITHUB_TOKEN }} --outputDir Releases --publish --releaseName "Stage Manager v${{ env.VERSION }}" --tag v${{ env.VERSION }}

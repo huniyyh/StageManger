@@ -59,6 +59,15 @@ public static class NativeWindow
         return (PInvoke.GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
     }
 
+    private static readonly HWND HWND_MESSAGE = new(-3);
+
+    /// <summary>Finds a message-only window by its title; zero when there is none. Used to reach an already running instance.</summary>
+    public static unsafe nint FindMessageOnlyWindow(string title)
+        => (nint)PInvoke.FindWindowEx(HWND_MESSAGE, HWND.Null, null, title).Value;
+
+    public static bool PostMessage(nint hwnd, uint message, nint wParam)
+        => PInvoke.PostMessage(new HWND(hwnd), message, new WPARAM((nuint)wParam), default);
+
     public static bool RegisterHotKey(nint hwnd, int id, bool ctrl, bool alt, bool shift, bool win, uint virtualKey)
     {
         var mods = HOT_KEY_MODIFIERS.MOD_NOREPEAT;

@@ -47,6 +47,8 @@ dotnet tool restore
 
 릴리스 절차는 태그 하나입니다. `v0.2.0` 처럼 태그를 푸시하면 GitHub Actions 가 테스트, 게시, 패키징을 거쳐 https://github.com/huniyyh/StageManger/releases 에 올립니다. 앱이 바라보는 저장소 주소는 [StageManager.App.csproj](src/StageManager.App/StageManager.App.csproj) 의 `UpdateRepository` 값입니다.
 
+저장소가 비공개면 앱이 릴리스 목록을 읽지 못해 업데이트 확인이 404 로 실패합니다. 공개 저장소로 바꾸거나, 릴리스 읽기 권한이 있는 토큰을 `%LocalAppData%\StageManager\github-token.txt` 파일이나 `STAGEMANAGER_GITHUB_TOKEN` 환경 변수에 넣어 두면 그 토큰으로 확인합니다. 토큰은 사용자 PC 에만 있고 설치 파일에는 들어가지 않습니다.
+
 서명하지 않은 설치 파일은 처음 실행 시 SmartScreen 경고가 뜹니다. 코드 서명 인증서가 생기면 `vpk pack` 에 `--signParams` 를 추가하면 됩니다.
 
 ## 진단 CLI

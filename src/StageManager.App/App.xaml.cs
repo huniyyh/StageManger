@@ -137,11 +137,20 @@ public partial class App : System.Windows.Application
     private async Task CheckForUpdatesAsync(bool interactive)
     {
         if (_updater == null) return;
-        bool ready = await _updater.CheckAsync();
-        if (!interactive || ready) return;
-        _tray?.ShowBalloon("Stage Manager", _updater.IsInstalled
-            ? $"최신 버전입니다 (v{_updater.CurrentVersion})."
-            : "설치된 빌드가 아니라서 업데이트 확인을 건너뜁니다.");
+        var result = await _updater.CheckAsync();
+        if (!interactive) return;
+        switch (result)
+        {
+            case UpdateCheckResult.UpToDate:
+                _tray?.ShowBalloon("Stage Manager", $"최신 버전입니다 (v{_updater.CurrentVersion}).");
+                break;
+            case UpdateCheckResult.NotInstalled:
+                _tray?.ShowBalloon("Stage Manager", "설치된 빌드가 아니라서 업데이트 확인을 건너뜁니다.");
+                break;
+            case UpdateCheckResult.Failed:
+                _tray?.ShowBalloon("업데이트 확인 실패", _updater.LastError ?? "원인을 알 수 없습니다. 로그를 확인하세요.");
+                break;
+        }
     }
 
     /// <summary>Puts the user's windows back, drops the tray icon and lets Velopack swap in the new version and restart.</summary>

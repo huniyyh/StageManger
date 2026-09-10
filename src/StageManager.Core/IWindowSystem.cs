@@ -20,6 +20,9 @@ public interface IWindowSystem
     /// <summary>The mouse pointer position in physical pixels.</summary>
     PointPx GetCursorPosition();
 
+    /// <summary>Identity of the virtual desktop the user is looking at; <see cref="Guid.Empty"/> when unknown.</summary>
+    Guid GetCurrentDesktop();
+
     void Minimize(WindowId id);
     void RestoreNoActivate(WindowId id);
     void SetBounds(WindowId id, RectPx bounds);

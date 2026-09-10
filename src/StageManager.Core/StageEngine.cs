@@ -1,9 +1,9 @@
 namespace StageManager.Core;
 
 /// <summary>
-/// The Stage Manager state machine. Exactly one stage is active and laid out in the center of the screen;
-/// every other stage is parked (its windows minimized) and represented by a thumbnail in the strip.
-/// All members must be called from a single thread.
+/// The Stage Manager state machine. Each virtual desktop has its own stages; on the current desktop exactly one
+/// stage is active and laid out in the center of the screen, every other stage is parked (its windows minimized)
+/// and represented by a thumbnail in the strip. All members must be called from a single thread.
 /// </summary>
 public sealed class StageEngine
 {
@@ -25,28 +25,46 @@ public sealed class StageEngine
     /// <summary>How long OS transitions stay off after we hid or showed a window without one.</summary>
     public static readonly TimeSpan TransitionRestoreDelay = TimeSpan.FromMilliseconds(500);
 
+    /// <summary>Stages and the active stage of one virtual desktop.</summary>
+    private sealed class DesktopState
+    {
+        public List<Stage> Stages { get; } = new();
+        public Stage? Active { get; set; }
+    }
+
     private readonly IWindowSystem _ws;
     private readonly Func<DateTimeOffset> _clock;
     private readonly Action<string>? _log;
-    private readonly List<Stage> _stages = new();
+    private readonly Dictionary<Guid, DesktopState> _desktops = new();
     private readonly Dictionary<WindowId, TrackedWindow> _windows = new();
     private readonly Dictionary<WindowId, DateTimeOffset> _pending = new();
     private readonly Dictionary<WindowId, (DateTimeOffset Due, int Attempts)> _settling = new();
     private readonly Dictionary<WindowId, DateTimeOffset> _transitionRestore = new();
+    private readonly HashSet<WindowId> _review = new();
+    private DesktopState _current = new();
+    private Guid _currentDesktop;
     private StageSwap? _pendingSwap;
     private WindowId? _userDragging;
 
     public LayoutSettings Layout { get; set; }
     public bool IsEnabled { get; private set; }
-    public Stage? ActiveStage { get; private set; }
 
-    /// <summary>All stages, most recently used first.</summary>
-    public IReadOnlyList<Stage> Stages => _stages;
+    /// <summary>The virtual desktop whose stages are exposed through <see cref="Stages"/> and <see cref="ActiveStage"/>.</summary>
+    public Guid CurrentDesktop => _currentDesktop;
 
-    /// <summary>Stages shown in the strip: everything except the active one, most recent first.</summary>
-    public IEnumerable<Stage> StripStages => _stages.Where(s => s != ActiveStage);
+    public Stage? ActiveStage
+    {
+        get => _current.Active;
+        private set => _current.Active = value;
+    }
 
-    /// <summary>Windows currently minimized by the engine; persisted so a crash can be undone.</summary>
+    /// <summary>The current desktop's stages, most recently used first.</summary>
+    public IReadOnlyList<Stage> Stages => _current.Stages;
+
+    /// <summary>Stages shown in the strip: everything on the current desktop except the active stage, most recent first.</summary>
+    public IEnumerable<Stage> StripStages => _current.Stages.Where(s => s != ActiveStage);
+
+    /// <summary>Windows currently minimized by the engine on any desktop; persisted so a crash can be undone.</summary>
     public IReadOnlyList<WindowId> ParkedByUs => _windows.Where(kv => kv.Value.ParkedByUs).Select(kv => kv.Key).ToList();
 
     public event Action? Changed;
@@ -70,7 +88,19 @@ public sealed class StageEngine
 
     public TrackedWindow? GetWindow(WindowId id) => _windows.GetValueOrDefault(id);
 
-    public Stage? FindStageOf(WindowId id) => _stages.FirstOrDefault(s => s.Windows.Contains(id));
+    /// <summary>The stage holding a window, on any desktop.</summary>
+    public Stage? FindStageOf(WindowId id)
+    {
+        var here = _current.Stages.FirstOrDefault(s => s.Windows.Contains(id));
+        if (here != null) return here;
+        foreach (var state in _desktops.Values)
+        {
+            if (state == _current) continue;
+            var there = state.Stages.FirstOrDefault(s => s.Windows.Contains(id));
+            if (there != null) return there;
+        }
+        return null;
+    }
 
     // ---------------------------------------------------------------- lifecycle
 
@@ -79,6 +109,8 @@ public sealed class StageEngine
         if (IsEnabled) return;
         Reset();
         IsEnabled = true;
+        _currentDesktop = _ws.GetCurrentDesktop();
+        _desktops[_currentDesktop] = _current;
 
         var fg = _ws.GetForegroundWindow();
         foreach (var info in _ws.EnumerateManageableWindows())
@@ -90,9 +122,9 @@ public sealed class StageEngine
         }
 
         Stage? active = fg is { } f ? FindStageOf(f) : null;
-        active ??= _stages.FirstOrDefault(s => s.Windows.Any(w => !_windows[w].Info.IsMinimized));
+        active ??= _current.Stages.FirstOrDefault(s => s.Windows.Any(w => !_windows[w].Info.IsMinimized));
 
-        foreach (var s in _stages)
+        foreach (var s in _current.Stages)
             if (s != active) Park(s);
 
         if (active != null)
@@ -103,7 +135,7 @@ public sealed class StageEngine
             MoveToFront(active);
         }
 
-        Log($"enabled: {_stages.Count} stage(s), active={active?.ToString() ?? "none"}");
+        Log($"enabled: {_current.Stages.Count} stage(s), active={active?.ToString() ?? "none"}");
         RaiseChanged();
     }
 
@@ -129,10 +161,10 @@ public sealed class StageEngine
         RaiseChanged();
     }
 
-    /// <summary>Brings a stage to the center immediately; the previously active stage is parked.</summary>
+    /// <summary>Brings a stage of the current desktop to the center immediately; the previously active stage is parked.</summary>
     public void ActivateStage(Stage stage)
     {
-        if (!IsEnabled || !_stages.Contains(stage)) return;
+        if (!IsEnabled || !_current.Stages.Contains(stage)) return;
         if (stage == ActiveStage)
         {
             FinishPendingSwap();
@@ -146,6 +178,64 @@ public sealed class StageEngine
         CommitPresent(swap);
     }
 
+    // ---------------------------------------------------------------- virtual desktops
+
+    /// <summary>Follows the user across virtual desktops: each desktop has its own stages and strip contents.</summary>
+    private void SyncDesktop()
+    {
+        var id = _ws.GetCurrentDesktop();
+        if (id == _currentDesktop) return;
+        FinishPendingSwap();
+        if (!_desktops.TryGetValue(id, out var state))
+        {
+            state = new DesktopState();
+            _desktops[id] = state;
+        }
+        _current = state;
+        _currentDesktop = id;
+        Log($"desktop {id:D} is now current with {_current.Stages.Count} stage(s)");
+        RaiseChanged();
+    }
+
+    /// <summary>
+    /// Windows that appear while the desktop may be changing are looked at again on the next tick, once
+    /// <see cref="SyncDesktop"/> has had a chance to run, so they land on the right desktop's stages.
+    /// </summary>
+    private void ProcessReview()
+    {
+        foreach (var id in _review.ToArray())
+        {
+            _review.Remove(id);
+            var info = _ws.GetWindowInfo(id);
+            if (info == null) continue; // cloaked again or gone
+            bool isForeground = _ws.GetForegroundWindow() == id;
+
+            if (!_windows.TryGetValue(id, out var w))
+            {
+                AddWindow(info, isForeground);
+                continue;
+            }
+
+            var stage = FindStageOf(id);
+            if (stage == null)
+            {
+                PlaceOnCurrentDesktop(w, info, isForeground);
+                continue;
+            }
+            if (_current.Stages.Contains(stage))
+            {
+                w.Info = info;
+                if (isForeground) OnForeground(id);
+                continue;
+            }
+
+            // The window is showing here but its stage belongs to another desktop: the user moved it over.
+            Log($"'{info.Title}' moved to this desktop");
+            Detach(stage, id);
+            PlaceOnCurrentDesktop(w, info, isForeground);
+        }
+    }
+
     // ---------------------------------------------------------------- swaps in two halves
 
     /// <summary>
@@ -155,7 +245,7 @@ public sealed class StageEngine
     /// </summary>
     public StageSwap? PrepareSwap(Stage to, bool suppressTransitions = false)
     {
-        if (!IsEnabled || !_stages.Contains(to) || to == ActiveStage) return null;
+        if (!IsEnabled || !_current.Stages.Contains(to) || to == ActiveStage) return null;
         FinishPendingSwap();
 
         var from = ActiveStage;
@@ -250,7 +340,7 @@ public sealed class StageEngine
     /// </summary>
     public void MergeIntoActive(Stage source, PointPx? anchor, bool suppressTransitions = false)
     {
-        if (!IsEnabled || !_stages.Contains(source) || source == ActiveStage) return;
+        if (!IsEnabled || !_current.Stages.Contains(source) || source == ActiveStage) return;
         FinishPendingSwap();
         if (ActiveStage == null)
         {
@@ -295,7 +385,7 @@ public sealed class StageEngine
             }
         }
 
-        _stages.Remove(source);
+        _current.Stages.Remove(source);
         if (primary is { } p)
         {
             _ws.Activate(p);
@@ -335,7 +425,7 @@ public sealed class StageEngine
 
         Detach(stage, id); // may dissolve the stage and leave no active stage
         var own = new Stage(w.Info.ProcessId, w.Info.ProcessName);
-        _stages.Insert(ActiveStage != null && _stages.Count > 0 && _stages[0] == ActiveStage ? 1 : 0, own);
+        _current.Stages.Insert(ActiveStage != null && _current.Stages.Count > 0 && _current.Stages[0] == ActiveStage ? 1 : 0, own);
         Attach(own, id);
 
         var info = _ws.GetWindowInfo(id);
@@ -360,12 +450,15 @@ public sealed class StageEngine
     }
 
     /// <summary>
-    /// Call periodically (a few times per second). Parks new windows that never became foreground, puts back
-    /// windows whose app moved them right after we placed them, and turns OS transitions back on.
+    /// Call periodically (a few times per second). Follows desktop switches, settles windows whose desktop was
+    /// in doubt, parks new windows that never became foreground, puts back windows whose app moved them right
+    /// after we placed them, and turns OS transitions back on.
     /// </summary>
     public void Tick()
     {
         if (!IsEnabled) return;
+        SyncDesktop();
+        if (_review.Count > 0) ProcessReview();
         if (_pending.Count > 0) ProcessPending();
         if (_settling.Count > 0) ProcessSettling();
         if (_transitionRestore.Count > 0) ProcessTransitionRestore();
@@ -431,6 +524,7 @@ public sealed class StageEngine
     public void OnWindowEvent(WindowEvent e)
     {
         if (!IsEnabled) return;
+        SyncDesktop();
         switch (e.Kind)
         {
             case WindowEventKind.Foreground: OnForeground(e.Window); break;
@@ -452,14 +546,23 @@ public sealed class StageEngine
         _pending.Remove(id);
         if (!_windows.ContainsKey(id))
         {
-            var info = _ws.GetWindowInfo(id);
-            if (info == null) return;
-            AddWindow(info, isForeground: true);
+            // Unknown windows are added on the next tick, once the current desktop is certain.
+            if (_ws.GetWindowInfo(id) != null) _review.Add(id);
             return;
         }
 
         var stage = FindStageOf(id);
-        if (stage == null) return;
+        if (stage == null)
+        {
+            _review.Add(id);
+            return;
+        }
+        if (!_current.Stages.Contains(stage))
+        {
+            _review.Add(id); // showing here, homed elsewhere: sort it out on the next tick
+            return;
+        }
+
         stage.Primary = id;
         if (stage == ActiveStage) return;
 
@@ -475,15 +578,22 @@ public sealed class StageEngine
         // it is removed when it is hidden or destroyed, not here.
         if (info == null) return;
 
-        if (_windows.TryGetValue(id, out var w))
+        if (!_windows.TryGetValue(id, out var w))
         {
-            bool titleChanged = w.Info.Title != info.Title;
-            w.Info = info;
-            if (titleChanged) RaiseChanged();
+            _review.Add(id); // new window: added on the next tick, once the current desktop is certain
             return;
         }
 
-        AddWindow(info, isForeground: _ws.GetForegroundWindow() == id);
+        var stage = FindStageOf(id);
+        if (stage != null && !_current.Stages.Contains(stage))
+        {
+            _review.Add(id); // showing here, homed elsewhere: sort it out on the next tick
+            return;
+        }
+
+        bool titleChanged = w.Info.Title != info.Title;
+        w.Info = info;
+        if (titleChanged) RaiseChanged();
     }
 
     private void OnMinimizeStarted(WindowId id)
@@ -510,7 +620,7 @@ public sealed class StageEngine
             {
                 Detach(stage, id);
                 var own = new Stage(w.Info.ProcessId, w.Info.ProcessName);
-                _stages.Insert(Math.Min(1, _stages.Count), own);
+                _current.Stages.Insert(Math.Min(1, _current.Stages.Count), own);
                 Attach(own, id);
             }
         }
@@ -526,6 +636,11 @@ public sealed class StageEngine
         if (stage == null) return;
         w.Info = w.Info with { IsMinimized = false };
         if (stage == ActiveStage) return; // restored by us, or already handled by OnForeground
+        if (!_current.Stages.Contains(stage))
+        {
+            _review.Add(id);
+            return;
+        }
 
         // The user restored a parked window from the taskbar.
         w.ParkedByUs = false;
@@ -582,6 +697,13 @@ public sealed class StageEngine
     {
         var w = new TrackedWindow(info) { OriginalBounds = info.IsMinimized ? null : info.Bounds };
         _windows[info.Id] = w;
+        PlaceOnCurrentDesktop(w, info, isForeground);
+    }
+
+    /// <summary>Puts a tracked window that has no stage on this desktop into one, presenting or parking it as appropriate.</summary>
+    private void PlaceOnCurrentDesktop(TrackedWindow w, WindowInfo info, bool isForeground)
+    {
+        w.Info = info;
         var stage = FindStageByProcess(info.ProcessId) ?? CreateStage(info, atEnd: false);
         Attach(stage, info.Id);
         Log($"add '{info.Title}' -> {stage}");
@@ -612,6 +734,7 @@ public sealed class StageEngine
         _pending.Remove(id);
         _settling.Remove(id);
         _transitionRestore.Remove(id);
+        _review.Remove(id);
         if (_userDragging == id)
         {
             _userDragging = null;
@@ -751,7 +874,7 @@ public sealed class StageEngine
         stage.Primary ??= id;
     }
 
-    /// <summary>Removes a window from a stage; a stage left empty disappears, and the active stage becomes none.</summary>
+    /// <summary>Removes a window from a stage on any desktop; a stage left empty disappears from its desktop.</summary>
     private void Detach(Stage stage, WindowId id)
     {
         stage.Windows.Remove(id);
@@ -761,8 +884,12 @@ public sealed class StageEngine
             if (_windows.TryGetValue(remaining, out var w)) stage.ProcessIds.Add(w.Info.ProcessId);
 
         if (stage.Windows.Count > 0) return;
-        _stages.Remove(stage);
-        if (stage == ActiveStage) ActiveStage = null;
+        foreach (var state in _desktops.Values)
+        {
+            if (!state.Stages.Remove(stage)) continue;
+            if (state.Active == stage) state.Active = null;
+            break;
+        }
     }
 
     private static WindowId? ResolvePrimary(Stage stage)
@@ -771,36 +898,40 @@ public sealed class StageEngine
         return stage.Windows.Count > 0 ? stage.Windows[0] : null;
     }
 
+    /// <summary>The current desktop's stage that already holds windows of a process, the active one first.</summary>
     private Stage? FindStageByProcess(uint pid)
     {
         if (ActiveStage?.ProcessIds.Contains(pid) == true) return ActiveStage;
-        return _stages.FirstOrDefault(s => s.ProcessIds.Contains(pid));
+        return _current.Stages.FirstOrDefault(s => s.ProcessIds.Contains(pid));
     }
 
     private Stage CreateStage(WindowInfo info, bool atEnd)
     {
         var stage = new Stage(info.ProcessId, info.ProcessName);
-        if (atEnd || _stages.Count == 0) _stages.Add(stage);
-        else _stages.Insert(ActiveStage != null && _stages[0] == ActiveStage ? 1 : 0, stage);
+        var stages = _current.Stages;
+        if (atEnd || stages.Count == 0) stages.Add(stage);
+        else stages.Insert(ActiveStage != null && stages[0] == ActiveStage ? 1 : 0, stage);
         return stage;
     }
 
     private void MoveToFront(Stage stage)
     {
-        _stages.Remove(stage);
-        _stages.Insert(0, stage);
+        _current.Stages.Remove(stage);
+        _current.Stages.Insert(0, stage);
     }
 
     private void Reset()
     {
-        _stages.Clear();
+        _desktops.Clear();
+        _current = new DesktopState();
+        _currentDesktop = Guid.Empty;
         _windows.Clear();
         _pending.Clear();
         _settling.Clear();
         _transitionRestore.Clear();
+        _review.Clear();
         _pendingSwap = null;
         _userDragging = null;
-        ActiveStage = null;
     }
 
     private void RaiseChanged() => Changed?.Invoke();

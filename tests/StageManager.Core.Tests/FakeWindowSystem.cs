@@ -69,6 +69,11 @@ internal sealed class FakeWindowSystem : IWindowSystem
     public PointPx CursorPosition { get; set; } = new(960, 520);
     public PointPx GetCursorPosition() => CursorPosition;
 
+    public static readonly Guid Desktop1 = new("11111111-1111-1111-1111-111111111111");
+    public static readonly Guid Desktop2 = new("22222222-2222-2222-2222-222222222222");
+    public Guid CurrentDesktop { get; set; } = Desktop1;
+    public Guid GetCurrentDesktop() => CurrentDesktop;
+
     public void SetTransitionsEnabled(WindowId id, bool enabled) => Ops.Add($"transitions {id.Value} {(enabled ? "on" : "off")}");
 
     public void Minimize(WindowId id) { Windows[id].Minimized = true; Ops.Add($"min {id.Value}"); }

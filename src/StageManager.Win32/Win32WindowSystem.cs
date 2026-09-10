@@ -83,6 +83,25 @@ public sealed unsafe class Win32WindowSystem : IWindowSystem, IDisposable
 
     public PointPx GetCursorPosition() => NativeWindow.GetCursorPosition();
 
+    private Microsoft.Win32.RegistryKey? _desktopsKey;
+    private bool _desktopsKeyMissing;
+
+    /// <summary>
+    /// The shell records the current virtual desktop under HKCU; there is no public API or event for it.
+    /// Reading the value is cheap enough to do on every tick and window event.
+    /// </summary>
+    public Guid GetCurrentDesktop()
+    {
+        if (_desktopsKey == null && !_desktopsKeyMissing)
+        {
+            _desktopsKey = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Explorer\VirtualDesktops");
+            _desktopsKeyMissing = _desktopsKey == null;
+        }
+        if (_desktopsKey?.GetValue("CurrentVirtualDesktop") is byte[] { Length: 16 } bytes)
+            return new Guid(bytes);
+        return Guid.Empty;
+    }
+
     public RectPx? GetRestoredBounds(WindowId id)
     {
         var hwnd = ToHwnd(id);
@@ -282,6 +301,8 @@ public sealed unsafe class Win32WindowSystem : IWindowSystem, IDisposable
         foreach (var hook in _hooks) PInvoke.UnhookWinEvent(hook);
         _hooks.Clear();
         _hookProc = null;
+        _desktopsKey?.Dispose();
+        _desktopsKey = null;
     }
 
     // ---------------------------------------------------------------- probing

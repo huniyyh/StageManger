@@ -224,6 +224,7 @@ public class StageEngineTests
         var c = ws.Add("C", 3);
 
         engine.OnWindowEvent(new WindowEvent(WindowEventKind.Shown, c));
+        engine.Tick(); // new windows are added once the current desktop is confirmed
         Assert.Equal(3, engine.Stages.Count);
         Assert.False(ws.IsMinimized(c));
 
@@ -247,6 +248,7 @@ public class StageEngineTests
         engine.OnWindowEvent(new WindowEvent(WindowEventKind.Shown, c));
         ws.Foreground = c;
         engine.OnWindowEvent(new WindowEvent(WindowEventKind.Foreground, c));
+        engine.Tick();
 
         Assert.Equal(c, engine.ActiveStage!.Primary);
         Assert.True(ws.IsMinimized(a1));
@@ -258,13 +260,15 @@ public class StageEngineTests
     }
 
     [Fact]
-    public void NewWindow_AlreadyForegroundWhenShown_ActivatesImmediately()
+    public void NewWindow_AlreadyForegroundWhenShown_ActivatesOnTheNextTick()
     {
         var (ws, engine, _, a1, _, _) = CreateEnabled();
         var c = ws.Add("C", 3);
         ws.Foreground = c;
 
         engine.OnWindowEvent(new WindowEvent(WindowEventKind.Shown, c));
+        Assert.Equal(2, engine.Stages.Count); // not before the desktop is confirmed
+        engine.Tick();
 
         Assert.Equal(c, engine.ActiveStage!.Primary);
         Assert.True(ws.IsMinimized(a1));
@@ -277,6 +281,7 @@ public class StageEngineTests
         var a3 = ws.Add("A3", 1, new RectPx(1400, 0, 2200, 600)); // overlaps the strip on the right
 
         engine.OnWindowEvent(new WindowEvent(WindowEventKind.Shown, a3));
+        engine.Tick();
 
         Assert.Equal(new[] { a1, a2, a3 }, engine.ActiveStage!.Windows);
         Assert.False(ws.IsMinimized(a3));
@@ -434,6 +439,7 @@ public class StageEngineTests
         var c = ws.Add("C", 3, new RectPx(0, 0, 800, 600));
         ws.Foreground = c;
         engine.OnWindowEvent(new WindowEvent(WindowEventKind.Shown, c));
+        engine.Tick();
         Assert.Equal(RectPx.FromSize(12 + (1696 - 800) / 2, 12 + (1016 - 600) / 2, 800, 600), ws.BoundsOf(c));
         return (ws, engine, clock, c);
     }
@@ -748,6 +754,7 @@ public class StageEngineTests
         var c = ws.Add("C", 2); // another window of app 2
         ws.Foreground = c;
         engine.OnWindowEvent(new WindowEvent(WindowEventKind.Shown, c));
+        engine.Tick();
 
         Assert.Single(engine.Stages);
         Assert.Contains(c, merged.Windows);
@@ -884,6 +891,169 @@ public class StageEngineTests
         clock.Advance(TimeSpan.FromMilliseconds(600));
         engine.Tick();
         Assert.Contains($"transitions {a2.Value} on", ws.Ops);
+    }
+
+    // ---------------------------------------------------------------- virtual desktops
+
+    [Fact]
+    public void SwitchingDesktops_ShowsEachDesktopsOwnStages()
+    {
+        var (ws, engine, clock, a1, _, b) = CreateEnabled();
+        var stageA = engine.ActiveStage!;
+        Assert.Equal(FakeWindowSystem.Desktop1, engine.CurrentDesktop);
+
+        // The user creates a new, empty desktop.
+        ws.CurrentDesktop = FakeWindowSystem.Desktop2;
+        engine.Tick();
+        Assert.Equal(FakeWindowSystem.Desktop2, engine.CurrentDesktop);
+        Assert.Empty(engine.Stages);
+        Assert.Null(engine.ActiveStage);
+        Assert.NotNull(engine.GetWindow(a1)); // still tracked
+        Assert.Equal(new[] { b }, engine.ParkedByUs); // still ours to restore
+
+        // An app opened there gets its own stage on that desktop.
+        var c = ws.Add("C", 3);
+        ws.Foreground = c;
+        engine.OnWindowEvent(new WindowEvent(WindowEventKind.Shown, c));
+        engine.Tick();
+        Assert.Single(engine.Stages);
+        Assert.Equal(c, engine.ActiveStage!.Primary);
+        Assert.False(ws.IsMinimized(a1)); // desktop 1's windows are not touched
+
+        // Back to the first desktop: its stages are exactly as they were.
+        ws.CurrentDesktop = FakeWindowSystem.Desktop1;
+        clock.Advance(TimeSpan.FromSeconds(1));
+        engine.Tick();
+        Assert.Equal(2, engine.Stages.Count);
+        Assert.Same(stageA, engine.ActiveStage);
+        Assert.True(ws.IsMinimized(b));
+        Assert.False(ws.IsMinimized(c)); // desktop 2's window is not touched either
+    }
+
+    [Fact]
+    public void DesktopSwitch_IsNoticedOnWindowEvents_Too()
+    {
+        var (ws, engine, _, _, _, _) = CreateEnabled();
+        int changes = 0;
+        engine.Changed += () => changes++;
+
+        ws.CurrentDesktop = FakeWindowSystem.Desktop2;
+        var c = ws.Add("C", 3);
+        ws.Foreground = c;
+        engine.OnWindowEvent(new WindowEvent(WindowEventKind.Foreground, c));
+
+        Assert.Equal(FakeWindowSystem.Desktop2, engine.CurrentDesktop);
+        Assert.Equal(1, changes); // the strip is told to show the new desktop right away
+    }
+
+    [Fact]
+    public void WindowsOfAnotherDesktop_AreStillMaintained()
+    {
+        var (ws, engine, _, _, _, b) = CreateEnabled();
+        var stageA = engine.ActiveStage!;
+        ws.CurrentDesktop = FakeWindowSystem.Desktop2;
+        engine.Tick();
+
+        ws.Remove(b);
+        engine.OnWindowEvent(new WindowEvent(WindowEventKind.Destroyed, b)); // closed from the taskbar, say
+
+        ws.CurrentDesktop = FakeWindowSystem.Desktop1;
+        engine.Tick();
+        Assert.Single(engine.Stages);
+        Assert.Same(stageA, engine.ActiveStage);
+        Assert.Null(engine.GetWindow(b));
+    }
+
+    [Fact]
+    public void WindowMovedToAnotherDesktop_JoinsThatDesktop()
+    {
+        var (ws, engine, _, a1, a2, _) = CreateEnabled();
+        var stageA = engine.ActiveStage!;
+        ws.CurrentDesktop = FakeWindowSystem.Desktop2;
+        engine.Tick();
+
+        // The user moved a2 here through Task View: it shows up uncloaked on this desktop.
+        engine.OnWindowEvent(new WindowEvent(WindowEventKind.Uncloaked, a2));
+        Assert.Empty(engine.Stages); // nothing until the next tick, when the desktop is certain
+        engine.Tick();
+
+        Assert.Single(engine.Stages);
+        Assert.Equal(new[] { a2 }, engine.Stages[0].Windows);
+        Assert.Equal(new[] { a1 }, stageA.Windows);
+    }
+
+    [Fact]
+    public void UnknownWindowsSeenDuringASwitch_LandOnTheDesktopThatIsCurrentAtTheNextTick()
+    {
+        var (ws, engine, _, _, _, _) = CreateEnabled();
+        var stageA = engine.ActiveStage!;
+
+        // Desktop 2's window uncloaks a moment before the registry says we are on desktop 2.
+        var c = ws.Add("C", 3);
+        ws.Foreground = c;
+        engine.OnWindowEvent(new WindowEvent(WindowEventKind.Uncloaked, c));
+        Assert.Equal(2, engine.Stages.Count); // not added yet
+        ws.CurrentDesktop = FakeWindowSystem.Desktop2;
+        engine.Tick();
+
+        Assert.Equal(FakeWindowSystem.Desktop2, engine.CurrentDesktop);
+        Assert.Single(engine.Stages);
+        Assert.Equal(c, engine.ActiveStage!.Primary);
+        Assert.DoesNotContain(c, stageA.Windows);
+    }
+
+    [Fact]
+    public void StagesOfAnotherDesktop_CannotBeActivatedOrMerged()
+    {
+        var (ws, engine, _, _, _, b) = CreateEnabled();
+        var stageB = engine.Stages[1];
+        ws.CurrentDesktop = FakeWindowSystem.Desktop2;
+        engine.Tick();
+        ws.Ops.Clear();
+
+        engine.ActivateStage(stageB);
+        engine.MergeIntoActive(stageB, null);
+        Assert.Null(engine.PrepareSwap(stageB));
+
+        Assert.Empty(ws.Ops);
+        Assert.True(ws.IsMinimized(b));
+    }
+
+    [Fact]
+    public void DesktopSwitch_FinishesAPendingSwap()
+    {
+        var (ws, engine, _, _, _, b) = CreateEnabled();
+        var swap = engine.PrepareSwap(engine.Stages[1], suppressTransitions: true)!;
+        engine.CommitPark(swap);
+
+        ws.CurrentDesktop = FakeWindowSystem.Desktop2;
+        engine.Tick();
+
+        Assert.True(swap.IsPresented);
+        Assert.False(ws.IsMinimized(b));
+    }
+
+    [Fact]
+    public void Disable_RestoresParkedWindowsOnEveryDesktop()
+    {
+        var (ws, engine, clock, _, _, b) = CreateEnabled();
+        ws.CurrentDesktop = FakeWindowSystem.Desktop2;
+        engine.Tick();
+        var c = ws.Add("C", 3);
+        var d = ws.Add("D", 4);
+        ws.Foreground = c;
+        engine.OnWindowEvent(new WindowEvent(WindowEventKind.Shown, c));
+        engine.OnWindowEvent(new WindowEvent(WindowEventKind.Shown, d));
+        engine.Tick();
+        clock.Advance(TimeSpan.FromMilliseconds(500));
+        engine.Tick(); // d never became foreground: parked on desktop 2
+        Assert.True(ws.IsMinimized(b));
+        Assert.True(ws.IsMinimized(d));
+
+        engine.Disable();
+
+        Assert.False(ws.IsMinimized(b)); // desktop 1
+        Assert.False(ws.IsMinimized(d)); // desktop 2
     }
 
     [Fact]

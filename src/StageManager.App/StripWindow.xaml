@@ -9,7 +9,10 @@
     <Window.Resources>
         <DataTemplate DataType="{x:Type local:StageItem}">
             <Border x:Name="Card" Margin="12,6" Padding="8" CornerRadius="10" Background="#00FFFFFF" Cursor="Hand"
-                    MouseLeftButtonDown="OnCardPressed">
+                    RenderTransformOrigin="0.5,0.5" MouseLeftButtonDown="OnCardPressed">
+                <Border.RenderTransform>
+                    <ScaleTransform x:Name="CardScale" />
+                </Border.RenderTransform>
                 <StackPanel>
                     <Grid>
                         <Border x:Name="ThumbBox" CornerRadius="6" Background="#66202020" MinHeight="72" ClipToBounds="True">
@@ -42,8 +45,33 @@
                 </StackPanel>
             </Border>
             <DataTemplate.Triggers>
+                <!-- Hover: a light wash and a gentle lift. -->
                 <Trigger SourceName="Card" Property="IsMouseOver" Value="True">
                     <Setter TargetName="Card" Property="Background" Value="#2AFFFFFF" />
+                    <Trigger.EnterActions>
+                        <BeginStoryboard>
+                            <Storyboard>
+                                <DoubleAnimation Storyboard.TargetName="CardScale" Storyboard.TargetProperty="ScaleX" To="1.04" Duration="0:0:0.14">
+                                    <DoubleAnimation.EasingFunction><CubicEase EasingMode="EaseOut" /></DoubleAnimation.EasingFunction>
+                                </DoubleAnimation>
+                                <DoubleAnimation Storyboard.TargetName="CardScale" Storyboard.TargetProperty="ScaleY" To="1.04" Duration="0:0:0.14">
+                                    <DoubleAnimation.EasingFunction><CubicEase EasingMode="EaseOut" /></DoubleAnimation.EasingFunction>
+                                </DoubleAnimation>
+                            </Storyboard>
+                        </BeginStoryboard>
+                    </Trigger.EnterActions>
+                    <Trigger.ExitActions>
+                        <BeginStoryboard>
+                            <Storyboard>
+                                <DoubleAnimation Storyboard.TargetName="CardScale" Storyboard.TargetProperty="ScaleX" To="1" Duration="0:0:0.18">
+                                    <DoubleAnimation.EasingFunction><CubicEase EasingMode="EaseOut" /></DoubleAnimation.EasingFunction>
+                                </DoubleAnimation>
+                                <DoubleAnimation Storyboard.TargetName="CardScale" Storyboard.TargetProperty="ScaleY" To="1" Duration="0:0:0.18">
+                                    <DoubleAnimation.EasingFunction><CubicEase EasingMode="EaseOut" /></DoubleAnimation.EasingFunction>
+                                </DoubleAnimation>
+                            </Storyboard>
+                        </BeginStoryboard>
+                    </Trigger.ExitActions>
                 </Trigger>
             </DataTemplate.Triggers>
         </DataTemplate>

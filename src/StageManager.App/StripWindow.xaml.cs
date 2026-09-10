@@ -4,6 +4,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using StageManager.Core;
@@ -17,8 +18,10 @@ public partial class StripWindow : Window
     private const double StripWidthDip = 200;
     private const double MarginDip = 12;
     private const int DragThresholdPx = 6;
-    private static readonly TimeSpan SwapDuration = TimeSpan.FromMilliseconds(280);
-    private static readonly TimeSpan RevealDelay = TimeSpan.FromMilliseconds(90);
+    private static readonly TimeSpan SwapDuration = TimeSpan.FromMilliseconds(360);
+    private static readonly TimeSpan RevealDelay = TimeSpan.FromMilliseconds(120);
+    private static readonly TimeSpan CardSlideDuration = TimeSpan.FromMilliseconds(320);
+    private static readonly TimeSpan CardFadeDuration = TimeSpan.FromMilliseconds(160);
 
     private readonly StageEngine _engine;
     private readonly IWindowSystem _ws;
@@ -75,7 +78,9 @@ public partial class StripWindow : Window
         };
     }
 
-    /// <summary>Rebuilds the cards from the engine state and shows or hides the strip.</summary>
+    // ---------------------------------------------------------------- cards
+
+    /// <summary>Brings the cards in line with the engine state, animating what moved, appeared or disappeared.</summary>
     public void Refresh()
     {
         if (_suppressRefresh) return;
@@ -88,17 +93,78 @@ public partial class StripWindow : Window
         }
 
         PositionOnPrimaryMonitor();
-        Items.Clear();
-        foreach (var stage in _engine.StripStages)
+        var desired = _engine.StripStages.Where(s => s != _stageLeavingStrip).ToList(); // a leaving stage's picture is mid-flight
+        AnimateLayoutChange(() =>
         {
-            if (stage == _stageLeavingStrip) continue; // its picture is mid-flight
-            Items.Add(BuildItem(stage));
-        }
+            for (int i = Items.Count - 1; i >= 0; i--)
+                if (!desired.Contains(Items[i].Stage)) Items.RemoveAt(i);
+
+            for (int i = 0; i < desired.Count; i++)
+            {
+                var item = Items.FirstOrDefault(it => it.Stage == desired[i]);
+                if (item == null)
+                {
+                    item = new StageItem(desired[i]);
+                    Items.Insert(i, item);
+                }
+                else if (Items.IndexOf(item) != i)
+                {
+                    Items.Move(Items.IndexOf(item), i);
+                }
+                Populate(item);
+            }
+        });
         if (!IsVisible) Show();
 
         _overlay ??= new SwapOverlay();
         _overlay.EnsureVisible(_ws.GetPrimaryWorkArea());
     }
+
+    /// <summary>
+    /// Runs a change to <see cref="Items"/> and animates its effect the FLIP way: cards that moved slide from
+    /// where they were, cards that appeared fade and grow in. Cards that vanished simply vanish.
+    /// </summary>
+    private void AnimateLayoutChange(Action mutate)
+    {
+        var before = new Dictionary<StageItem, double>();
+        foreach (var item in Items)
+            if (ContainerOf(item) is { IsLoaded: true } container)
+                before[item] = container.TranslatePoint(new Point(0, 0), Cards).Y;
+
+        mutate();
+
+        Dispatcher.InvokeAsync(() =>
+        {
+            Cards.UpdateLayout();
+            foreach (var item in Items)
+            {
+                if (ContainerOf(item) is not { } container) continue;
+                double now = container.TranslatePoint(new Point(0, 0), Cards).Y;
+                if (before.TryGetValue(item, out double was))
+                {
+                    double delta = was - now;
+                    if (Math.Abs(delta) < 0.5) continue;
+                    var slide = new TranslateTransform(0, delta);
+                    container.RenderTransform = slide;
+                    slide.BeginAnimation(TranslateTransform.YProperty, new DoubleAnimation(0, CardSlideDuration) { EasingFunction = new SpringEase() });
+                }
+                else
+                {
+                    container.Opacity = 0;
+                    container.RenderTransformOrigin = new Point(0.5, 0.5);
+                    var grow = new ScaleTransform(0.88, 0.88);
+                    container.RenderTransform = grow;
+                    var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
+                    container.BeginAnimation(OpacityProperty, new DoubleAnimation(1, CardFadeDuration));
+                    grow.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(1, CardFadeDuration) { EasingFunction = ease });
+                    grow.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(1, CardFadeDuration) { EasingFunction = ease });
+                }
+            }
+        }, DispatcherPriority.Loaded);
+    }
+
+    private FrameworkElement? ContainerOf(StageItem item)
+        => Cards.ItemContainerGenerator.ContainerFromItem(item) as FrameworkElement;
 
     private void PositionOnPrimaryMonitor()
     {
@@ -112,19 +178,18 @@ public partial class StripWindow : Window
 
     private RectPx StripArea() => StageLayout.StripArea(_ws.GetPrimaryWorkArea(), _engine.Layout);
 
-    private StageItem BuildItem(Stage stage)
+    private void Populate(StageItem item)
     {
+        var stage = item.Stage;
         var primaryId = stage.Primary ?? stage.Windows[0];
         var primary = _engine.GetWindow(primaryId) ?? _engine.GetWindow(stage.Windows[0]);
         var withSnapshot = stage.Windows.Select(_engine.GetWindow).FirstOrDefault(w => w?.Snapshot != null);
 
-        BitmapSource? thumbnail = null;
-        if (withSnapshot?.Snapshot is { } snapshot)
-            thumbnail = GetThumbnail(withSnapshot.Info.Id, snapshot);
-
-        var icon = GetIcon(primary?.Info.ExecutablePath);
-        var title = primary?.Info.Title ?? stage.Label;
-        return new StageItem(stage, thumbnail, icon, title, stage.Label, stage.Windows.Count);
+        item.Thumbnail = withSnapshot?.Snapshot is { } snapshot ? GetThumbnail(withSnapshot.Info.Id, snapshot) : null;
+        item.Icon = GetIcon(primary?.Info.ExecutablePath);
+        item.Title = primary?.Info.Title ?? stage.Label;
+        item.Label = stage.Label;
+        item.Count = stage.Windows.Count;
     }
 
     private BitmapSource GetThumbnail(WindowId id, Snapshot snapshot)
@@ -200,7 +265,7 @@ public partial class StripWindow : Window
         if (NativeWindow.IsShiftDown())
         {
             // As on macOS: Shift-click adds the stage to the current one instead of swapping.
-            _engine.MergeIntoActive(item.Stage, anchor: null, suppressTransitions: true);
+            _ = MergeWithAnimationAsync(item.Stage, anchor: null, from: ScreenRectOf(item));
             return;
         }
 
@@ -252,11 +317,14 @@ public partial class StripWindow : Window
             return;
         }
 
-        _overlay?.HideGhost();
         bool backOnStrip = StripArea().Contains(cursor);
         Log.Write($"card dropped at {cursor}: {(backOnStrip ? "back on the strip, cancelled" : "merge " + press.Item.Stage)}");
-        if (backOnStrip) return;
-        _engine.MergeIntoActive(press.Item.Stage, cursor, suppressTransitions: true);
+        if (backOnStrip)
+        {
+            _overlay?.HideGhost();
+            return;
+        }
+        _ = MergeWithAnimationAsync(press.Item.Stage, cursor, GhostRect(press, cursor));
     }
 
     private static RectPx GhostRect(CardPress press, PointPx cursor)
@@ -265,6 +333,47 @@ public partial class StripWindow : Window
             press.ThumbRect.Top + (cursor.Y - press.Start.Y),
             press.ThumbRect.Width,
             press.ThumbRect.Height);
+
+    /// <summary>Merges a stage into the active one; its picture grows from <paramref name="from"/> to where the window will be.</summary>
+    private async Task MergeWithAnimationAsync(Stage stage, PointPx? anchor, RectPx? from)
+    {
+        var plan = _engine.PlanMerge(stage, anchor);
+        var lead = plan.FirstOrDefault(p => p.IsPrimary && p.Snapshot != null) ?? plan.FirstOrDefault(p => p.Snapshot != null);
+        if (lead?.Snapshot == null || from == null || _swapInProgress)
+        {
+            _overlay?.HideGhost();
+            _engine.MergeIntoActive(stage, anchor, suppressTransitions: true);
+            return;
+        }
+
+        _swapInProgress = true;
+        _suppressRefresh = true;
+        try
+        {
+            var visible = lead.Snapshot.VisibleArea(lead.Bounds);
+            var flights = new List<SwapOverlay.Flight> { new(GetThumbnail(lead.Id, lead.Snapshot), from.Value, visible) };
+            _overlay ??= new SwapOverlay();
+            _overlay.EnsureVisible(_ws.GetPrimaryWorkArea());
+            await _overlay.PresentAsync(flights); // replaces the ghost with the same picture in the same place
+            await _overlay.AnimateAsync(SwapDuration);
+            _engine.MergeIntoActive(stage, anchor, suppressTransitions: true); // the real windows appear underneath the picture
+            _suppressRefresh = false;
+            Refresh();
+            await Task.Delay(RevealDelay);
+        }
+        catch (Exception ex)
+        {
+            Log.Write("merge animation failed: " + ex);
+            _engine.MergeIntoActive(stage, anchor, suppressTransitions: true);
+        }
+        finally
+        {
+            _overlay?.Dismiss();
+            _swapInProgress = false;
+            _suppressRefresh = false;
+            Refresh();
+        }
+    }
 
     // ---------------------------------------------------------------- windows dragged onto the strip
 
@@ -312,6 +421,9 @@ public partial class StripWindow : Window
             await _overlay.PresentAsync(flights);
             _engine.CommitDetach(id, suppressTransitions: true); // the real window vanishes underneath its picture
             await _overlay.AnimateAsync(SwapDuration);
+            _suppressRefresh = false;
+            Refresh(); // the new card fades in underneath the picture
+            await Task.Delay(RevealDelay);
         }
         catch (Exception ex)
         {
@@ -348,7 +460,7 @@ public partial class StripWindow : Window
             var stripArea = StripArea();
             var cardRect = ScreenRectOf(item) ?? stripArea;
             var topSlot = (Items.Count > 0 ? ScreenRectOf(Items[0]) : null) ?? cardRect;
-            Items.Remove(item);
+            AnimateLayoutChange(() => Items.Remove(item)); // the cards below slide up into the gap
 
             // Pictures cover only the visible part of a window, so they fly between visible rectangles.
             var flights = new List<SwapOverlay.Flight>();
@@ -379,7 +491,7 @@ public partial class StripWindow : Window
             parked = clock.ElapsedMilliseconds;
             await _overlay.AnimateAsync(SwapDuration);
             animated = clock.ElapsedMilliseconds;
-            _engine.CommitPresent(swap);   // the real incoming windows appear underneath their pictures
+            _engine.CommitPresent(swap);   // the real incoming windows appear underneath their pictures; the new card fades in
             presented = clock.ElapsedMilliseconds;
             await Task.Delay(RevealDelay); // give them a moment to paint before the pictures go away
             Log.Write($"swap timing ms: prepare {prepared}, overlay {shown - prepared}, park {parked - shown}, animate {animated - parked}, present {presented - animated}");
@@ -401,7 +513,7 @@ public partial class StripWindow : Window
     /// <summary>Screen rectangle, in physical pixels, of a card's thumbnail box.</summary>
     private RectPx? ScreenRectOf(StageItem item)
     {
-        if (Cards.ItemContainerGenerator.ContainerFromItem(item) is not FrameworkElement container) return null;
+        if (ContainerOf(item) is not { } container) return null;
         var box = FindDescendant<Border>(container, "ThumbBox");
         if (box == null || box.ActualWidth <= 0 || box.ActualHeight <= 0) return null;
         var topLeft = box.PointToScreen(new Point(0, 0));

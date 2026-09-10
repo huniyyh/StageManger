@@ -734,6 +734,41 @@ public class StageEngineTests
     }
 
     [Fact]
+    public void PlanMerge_SaysWhereMergeIntoActiveWillPutTheWindows()
+    {
+        var (ws, engine, _, _, _, b) = CreateEnabled();
+        var stageB = engine.Stages[1];
+        var anchor = new PointPx(600, 400);
+
+        var plan = engine.PlanMerge(stageB, anchor);
+        var planned = Assert.Single(plan);
+        Assert.Equal(b, planned.Id);
+        Assert.True(planned.IsPrimary);
+        Assert.NotNull(planned.Snapshot);
+        Assert.True(ws.IsMinimized(b)); // planning changes nothing
+
+        engine.MergeIntoActive(stageB, anchor);
+        Assert.Equal(planned.Bounds, ws.BoundsOf(b));
+    }
+
+    [Fact]
+    public void PlanMerge_WithoutAnActiveStage_MatchesActivation()
+    {
+        var (ws, engine, _) = Create();
+        var a = ws.Add("A", 1);
+        var b = ws.Add("B", 2);
+        ws.Foreground = a;
+        engine.Enable();
+        ws.Remove(a);
+        engine.OnWindowEvent(new WindowEvent(WindowEventKind.Destroyed, a));
+
+        var planned = Assert.Single(engine.PlanMerge(engine.Stages[0], new PointPx(500, 500)));
+        engine.MergeIntoActive(engine.Stages[0], new PointPx(500, 500));
+
+        Assert.Equal(planned.Bounds, ws.BoundsOf(b));
+    }
+
+    [Fact]
     public void MergeIntoActive_KeepsTheDroppedWindowOnScreen()
     {
         var (ws, engine, _, _, _, b) = CreateEnabled();

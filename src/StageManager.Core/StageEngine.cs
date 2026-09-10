@@ -334,9 +334,51 @@ public sealed class StageEngine
     // ---------------------------------------------------------------- grouping: merge and detach
 
     /// <summary>
+    /// Where each window of <paramref name="source"/> ends up when it is merged into the active stage now, with the
+    /// picture taken when it was parked. No side effects; lets the UI fly the picture there before merging.
+    /// With no active stage the answer is where <see cref="ActivateStage"/> would put the windows.
+    /// </summary>
+    public IReadOnlyList<SwapWindow> PlanMerge(Stage source, PointPx? anchor)
+    {
+        if (!IsEnabled || !_current.Stages.Contains(source) || source == ActiveStage) return Array.Empty<SwapWindow>();
+        var primary = ResolvePrimary(source);
+        if (ActiveStage == null)
+        {
+            return PlanPresentation(source)
+                .Select(p => new SwapWindow(p.Id, p.Bounds, _windows.GetValueOrDefault(p.Id)?.Snapshot, p.Id == primary))
+                .ToList();
+        }
+
+        var workArea = _ws.GetPrimaryWorkArea();
+        var available = StageLayout.AvailableArea(workArea, Layout);
+        var plan = new List<SwapWindow>();
+        foreach (var id in source.Windows)
+        {
+            if (!_windows.TryGetValue(id, out var w)) continue;
+            var info = _ws.GetWindowInfo(id);
+            if (info == null) continue;
+
+            RectPx target;
+            if (info.IsMaximized)
+            {
+                target = workArea;
+            }
+            else
+            {
+                var current = info.IsMinimized ? _ws.GetRestoredBounds(id) ?? info.Bounds : info.Bounds;
+                var size = w.StageBounds ?? current;
+                target = StageLayout.Place(anchor is { } a ? size.CenteredAt(a) : size, available, center: false);
+            }
+            plan.Add(new SwapWindow(id, target, w.Snapshot, id == primary));
+        }
+        return plan;
+    }
+
+    /// <summary>
     /// Adds every window of <paramref name="source"/> to the active stage, the way dragging a thumbnail onto the
     /// desktop does on macOS. With an <paramref name="anchor"/> the windows are centered on it (kept on screen);
     /// without one they keep their remembered places. With no active stage this simply activates the stage.
+    /// The windows land exactly where <see cref="PlanMerge"/> said they would.
     /// </summary>
     public void MergeIntoActive(Stage source, PointPx? anchor, bool suppressTransitions = false)
     {
@@ -349,12 +391,13 @@ public sealed class StageEngine
         }
 
         var target = ActiveStage;
-        var available = StageLayout.AvailableArea(_ws.GetPrimaryWorkArea(), Layout);
+        var plan = PlanMerge(source, anchor);
         var primary = ResolvePrimary(source);
         Log($"merge {source} into {target}");
 
-        foreach (var id in source.Windows.ToArray())
+        foreach (var planned in plan)
         {
+            var id = planned.Id;
             if (!_windows.TryGetValue(id, out var w)) continue;
             Detach(source, id);
             Attach(target, id);
@@ -370,19 +413,8 @@ public sealed class StageEngine
             }
             w.OriginalBounds ??= info.Bounds;
 
-            if (info.IsMaximized)
-            {
-                MarkPresented(w, info);
-            }
-            else if (anchor is { } a)
-            {
-                var size = w.StageBounds ?? info.Bounds;
-                ApplyBounds(w, info, StageLayout.Place(size.CenteredAt(a), available, center: false));
-            }
-            else
-            {
-                PlaceWindow(w, info, available, center: false);
-            }
+            if (info.IsMaximized) MarkPresented(w, info);
+            else ApplyBounds(w, info, planned.Bounds);
         }
 
         _current.Stages.Remove(source);

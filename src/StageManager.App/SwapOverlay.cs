@@ -3,6 +3,7 @@ using System.Windows.Controls;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
+using System.Windows.Media.Effects;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using StageManager.Core;
@@ -20,8 +21,11 @@ internal sealed class SwapOverlay : Window
     /// <summary>A picture that travels from one screen rectangle to another, both in physical pixels.</summary>
     public sealed record Flight(BitmapSource Image, RectPx From, RectPx To);
 
+    private const double CornerRadiusDip = 8;
+
     private readonly Canvas _canvas = new();
-    private readonly List<(Image Element, Flight Flight)> _flights = new();
+    private readonly List<(FrameworkElement Element, Flight Flight)> _flights = new();
+    private FrameworkElement? _ghost;
     private RectPx _area;
     private double _scale = 1;
 
@@ -66,13 +70,13 @@ internal sealed class SwapOverlay : Window
         EnsureVisible(_area);
         _canvas.Children.Clear();
         _flights.Clear();
+        _ghost = null;
         foreach (var flight in flights)
         {
-            var image = new Image { Source = flight.Image, Stretch = Stretch.Fill };
-            RenderOptions.SetBitmapScalingMode(image, BitmapScalingMode.Linear);
-            Place(image, flight.From);
-            _canvas.Children.Add(image);
-            _flights.Add((image, flight));
+            var picture = MakePicture(flight.Image, opacity: 1);
+            Place(picture, flight.From);
+            _canvas.Children.Add(picture);
+            _flights.Add((picture, flight));
         }
         NativeWindow.RaiseTopmost(new WindowInteropHelper(this).Handle); // above the strip
 
@@ -82,7 +86,7 @@ internal sealed class SwapOverlay : Window
         await Task.Delay(16);
     }
 
-    /// <summary>Moves every flight to its target rectangle with an ease-out curve.</summary>
+    /// <summary>Moves every flight to its target rectangle along a spring curve.</summary>
     public Task AnimateAsync(TimeSpan duration)
     {
         var done = new TaskCompletionSource();
@@ -93,7 +97,7 @@ internal sealed class SwapOverlay : Window
         }
 
         var storyboard = new Storyboard();
-        var easing = new CubicEase { EasingMode = EasingMode.EaseOut };
+        var easing = new SpringEase();
         foreach (var (element, flight) in _flights)
         {
             var (left, top, width, height) = ToDip(flight.To);
@@ -117,16 +121,12 @@ internal sealed class SwapOverlay : Window
 
     // ---------------------------------------------------------------- drag ghost
 
-    private Image? _ghost;
-
     /// <summary>Shows a picture that follows the pointer while a card is being dragged out of the strip.</summary>
     public void ShowGhost(BitmapSource image, RectPx rect)
     {
         EnsureVisible(_area);
         HideGhost();
-        _ghost = new Image { Source = image, Stretch = Stretch.Fill, Opacity = 0.92 };
-        _ghost.Effect = new System.Windows.Media.Effects.DropShadowEffect { BlurRadius = 18, ShadowDepth = 4, Opacity = 0.5 };
-        RenderOptions.SetBitmapScalingMode(_ghost, BitmapScalingMode.Linear);
+        _ghost = MakePicture(image, opacity: 0.94);
         Place(_ghost, rect);
         _canvas.Children.Add(_ghost);
         NativeWindow.RaiseTopmost(new WindowInteropHelper(this).Handle);
@@ -144,7 +144,23 @@ internal sealed class SwapOverlay : Window
         _ghost = null;
     }
 
-    private static DoubleAnimation Animate(Image target, DependencyProperty property, double to, TimeSpan duration, IEasingFunction easing)
+    // ---------------------------------------------------------------- helpers
+
+    /// <summary>A window picture drawn like a window: rounded corners and a soft shadow.</summary>
+    private static FrameworkElement MakePicture(BitmapSource image, double opacity)
+    {
+        var picture = new Border
+        {
+            CornerRadius = new CornerRadius(CornerRadiusDip),
+            Background = new ImageBrush(image) { Stretch = Stretch.Fill },
+            Opacity = opacity,
+            Effect = new DropShadowEffect { BlurRadius = 22, ShadowDepth = 6, Direction = 270, Opacity = 0.38 },
+        };
+        RenderOptions.SetBitmapScalingMode(picture, BitmapScalingMode.Linear);
+        return picture;
+    }
+
+    private static DoubleAnimation Animate(FrameworkElement target, DependencyProperty property, double to, TimeSpan duration, IEasingFunction easing)
     {
         var animation = new DoubleAnimation(to, duration) { EasingFunction = easing };
         Storyboard.SetTarget(animation, target);
@@ -152,13 +168,13 @@ internal sealed class SwapOverlay : Window
         return animation;
     }
 
-    private void Place(Image image, RectPx rect)
+    private void Place(FrameworkElement picture, RectPx rect)
     {
         var (left, top, width, height) = ToDip(rect);
-        Canvas.SetLeft(image, left);
-        Canvas.SetTop(image, top);
-        image.Width = width;
-        image.Height = height;
+        Canvas.SetLeft(picture, left);
+        Canvas.SetTop(picture, top);
+        picture.Width = width;
+        picture.Height = height;
     }
 
     private (double Left, double Top, double Width, double Height) ToDip(RectPx rect)

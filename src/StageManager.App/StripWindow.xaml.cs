@@ -18,7 +18,7 @@ public partial class StripWindow : Window
     private const double StripWidthDip = 200;
     private const double MarginDip = 12;
     private const int DragThresholdPx = 6;
-    private static readonly TimeSpan SwapDuration = TimeSpan.FromMilliseconds(360);
+    private static readonly TimeSpan SwapDuration = TimeSpan.FromMilliseconds(450);
     private static readonly TimeSpan RevealDelay = TimeSpan.FromMilliseconds(120);
     private static readonly TimeSpan CardSlideDuration = TimeSpan.FromMilliseconds(320);
     private static readonly TimeSpan CardFadeDuration = TimeSpan.FromMilliseconds(160);

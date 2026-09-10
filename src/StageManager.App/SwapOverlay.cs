@@ -149,7 +149,10 @@ internal sealed class SwapOverlay : Window
         }
 
         var storyboard = new Storyboard();
-        var easing = new SpringEase();
+        // Gentler than the default spring, which arrives within a third of the duration and then sits still: the
+        // pictures cross most of the screen, and a swap reads better when they visibly decelerate the whole way.
+        // With these values the flight is 43% done at a fifth of the duration, 91% at half, settled by the end.
+        var easing = new SpringEase { Damping = 0.9, Frequency = 7 };
         foreach (var (element, flight) in _flights)
         {
             var (left, top, width, height) = ToDip(flight.To);

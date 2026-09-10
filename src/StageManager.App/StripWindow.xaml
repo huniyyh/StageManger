@@ -81,8 +81,9 @@
         <!-- Lit up while the user drags a window over the strip: "drop it here to send it to the strip". -->
         <Border x:Name="DropHighlight" Margin="6,10" CornerRadius="14" Background="#26FFFFFF"
                 BorderBrush="#99FFFFFF" BorderThickness="2" Visibility="Collapsed" IsHitTestVisible="False" />
+        <!-- The cards gather in the vertical middle of the strip; once there are more than fit they start at the top and scroll. -->
         <ScrollViewer VerticalScrollBarVisibility="Hidden" HorizontalScrollBarVisibility="Disabled">
-            <ItemsControl x:Name="Cards" ItemsSource="{Binding Items}" Margin="0,16" />
+            <ItemsControl x:Name="Cards" ItemsSource="{Binding Items}" Margin="0,16" VerticalAlignment="Center" />
         </ScrollViewer>
     </Grid>
 </Window>

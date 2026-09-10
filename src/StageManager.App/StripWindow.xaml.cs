@@ -19,10 +19,10 @@ public partial class StripWindow : Window
     private const double StripWidthDip = 200;
     private const double MarginDip = 12;
     private const int DragThresholdPx = 6;
-    private static readonly TimeSpan SwapDuration = TimeSpan.FromMilliseconds(450);
+    private static readonly TimeSpan SwapDuration = TimeSpan.FromMilliseconds(480);
     private static readonly TimeSpan RevealFade = TimeSpan.FromMilliseconds(260); // the pictures dissolve into the real windows over this
-    private static readonly TimeSpan CardSlideDuration = TimeSpan.FromMilliseconds(320);
-    private static readonly TimeSpan CardFadeDuration = TimeSpan.FromMilliseconds(160);
+    private static readonly TimeSpan CardSlideDuration = TimeSpan.FromMilliseconds(420); // cards closing a gap or making room, on the same spring as the flights and a little ahead of them
+    private static readonly TimeSpan CardFadeDuration = TimeSpan.FromMilliseconds(280);
     private static readonly TimeSpan StripSlideDuration = TimeSpan.FromMilliseconds(220);
     private static readonly TimeSpan PeekDwell = TimeSpan.FromMilliseconds(150);
     private static readonly TimeSpan PeekLinger = TimeSpan.FromMilliseconds(400);
@@ -44,6 +44,9 @@ public partial class StripWindow : Window
     private Stage? _stageLeavingStrip;
     private SwapOverlay? _overlay;
     private CardPress? _press;
+
+    /// <summary>Stages whose new card stays invisible until the picture flying towards it has landed; see <see cref="RevealHeld"/>.</summary>
+    private readonly HashSet<Stage> _held = new();
 
     public ObservableCollection<StageItem> Items { get; } = new();
 
@@ -100,15 +103,21 @@ public partial class StripWindow : Window
 
     // ---------------------------------------------------------------- cards
 
-    /// <summary>Brings the cards in line with the engine state, animating what moved, appeared or disappeared.</summary>
+    /// <summary>Brings the cards in line with the engine state, unless an animation sequence is doing that itself.</summary>
     public void Refresh()
     {
-        if (_suppressRefresh) return;
+        if (!_suppressRefresh) RefreshNow();
+    }
+
+    /// <summary>Brings the cards in line with the engine state right now, animating what moved, appeared or disappeared.</summary>
+    private void RefreshNow()
+    {
         if (!_engine.IsEnabled)
         {
             Hide();
             _overlay?.HideNow();
             Items.Clear();
+            _held.Clear();
             _pictures.Clear(); // the engine forgot every window, so their pictures go too
             _peekTimer.Stop();
             _peeking = false;
@@ -232,14 +241,16 @@ public partial class StripWindow : Window
 
     /// <summary>
     /// Runs a change to <see cref="Items"/> and animates its effect the FLIP way: cards that moved slide from
-    /// where they were, cards that appeared fade and grow in. Cards that vanished simply vanish.
+    /// where they were, cards that appeared fade and grow in. Cards that vanished simply vanish. Positions are
+    /// measured against the strip itself, so the whole group re-centering after a card came or went is part of
+    /// the movement rather than a jump.
     /// </summary>
     private void AnimateLayoutChange(Action mutate)
     {
         var before = new Dictionary<StageItem, double>();
         foreach (var item in Items)
             if (ContainerOf(item) is { IsLoaded: true } container)
-                before[item] = container.TranslatePoint(new Point(0, 0), Cards).Y;
+                before[item] = container.TranslatePoint(new Point(0, 0), StripRoot).Y;
 
         mutate();
 
@@ -249,7 +260,7 @@ public partial class StripWindow : Window
             foreach (var item in Items)
             {
                 if (ContainerOf(item) is not { } container) continue;
-                double now = container.TranslatePoint(new Point(0, 0), Cards).Y;
+                double now = container.TranslatePoint(new Point(0, 0), StripRoot).Y;
                 if (before.TryGetValue(item, out double was))
                 {
                     double delta = was - now;
@@ -258,19 +269,47 @@ public partial class StripWindow : Window
                     container.RenderTransform = slide;
                     slide.BeginAnimation(TranslateTransform.YProperty, new DoubleAnimation(0, CardSlideDuration) { EasingFunction = new SpringEase() });
                 }
+                else if (_held.Contains(item.Stage))
+                {
+                    container.Opacity = 0; // its place is made now; it shows once the picture bound for it has landed
+                }
                 else
                 {
-                    container.Opacity = 0;
-                    container.RenderTransformOrigin = new Point(0.5, 0.5);
-                    var grow = new ScaleTransform(0.88, 0.88);
-                    container.RenderTransform = grow;
-                    var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
-                    container.BeginAnimation(OpacityProperty, new DoubleAnimation(1, CardFadeDuration));
-                    grow.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(1, CardFadeDuration) { EasingFunction = ease });
-                    grow.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(1, CardFadeDuration) { EasingFunction = ease });
+                    FadeIn(container);
                 }
             }
         }, DispatcherPriority.Loaded);
+    }
+
+    private static void FadeIn(FrameworkElement container)
+    {
+        container.Opacity = 0;
+        container.RenderTransformOrigin = new Point(0.5, 0.5);
+        var grow = new ScaleTransform(0.88, 0.88);
+        container.RenderTransform = grow;
+        var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
+        container.BeginAnimation(OpacityProperty, new DoubleAnimation(1, CardFadeDuration));
+        grow.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(1, CardFadeDuration) { EasingFunction = ease });
+        grow.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(1, CardFadeDuration) { EasingFunction = ease });
+    }
+
+    /// <summary>Fades in the cards that were kept invisible while a picture flew to them.</summary>
+    private void RevealHeld()
+    {
+        if (_held.Count == 0) return;
+        foreach (var item in Items)
+            if (_held.Contains(item.Stage) && ContainerOf(item) is { } container) FadeIn(container);
+        _held.Clear();
+    }
+
+    private StageItem? ItemOf(Stage? stage) => stage == null ? null : Items.FirstOrDefault(it => it.Stage == stage);
+
+    /// <summary>Where a stage's card sits on screen once the pending layout has run; null when it has no card.</summary>
+    private RectPx? SlotOf(Stage? stage)
+    {
+        if (ItemOf(stage) is not { } item) return null;
+        Cards.UpdateLayout(); // generates and arranges the container of a card that was just added
+        return ScreenRectOf(item);
     }
 
     private FrameworkElement? ContainerOf(StageItem item)
@@ -675,8 +714,7 @@ public partial class StripWindow : Window
             await overlay.PresentAsync(flights, _ws.GetPrimaryWorkArea()); // replaces the ghost with the same picture in the same place
             await overlay.AnimateAsync(SwapDuration);
             _engine.MergeIntoActive(stage, anchor, suppressTransitions: true); // the real windows appear underneath the picture
-            _suppressRefresh = false;
-            Refresh();
+            RefreshNow(); // the card goes and the others close ranks
             await overlay.FadeOutAsync(RevealFade); // the picture dissolves into the real window rather than snapping to it
         }
         catch (Exception ex)
@@ -735,19 +773,20 @@ public partial class StripWindow : Window
         _suppressRefresh = true;
         try
         {
-            var topSlot = (Items.Count > 0 ? ScreenRectOf(Items[0]) : null) ?? StripArea();
             var visible = picture.Snapshot.VisibleArea(picture.Bounds);
-            var flights = new List<SwapOverlay.Flight>
-            {
-                new(FlightPicture(id, picture.Snapshot), visible, FitInto(visible, topSlot)),
-            };
-
+            // The picture is bound for the card the strip is about to make for this window. Until that card exists
+            // it aims at the strip as a whole, which also makes the overlay cover the whole band.
+            var flight = new SwapOverlay.Flight(FlightPicture(id, picture.Snapshot), visible, StripArea());
             var overlay = Overlay();
-            await overlay.PresentAsync(flights, _ws.GetPrimaryWorkArea());
+            await overlay.PresentAsync(new[] { flight }, _ws.GetPrimaryWorkArea());
             _engine.CommitDetach(id, suppressTransitions: true); // the real window vanishes underneath its picture
+
+            var own = _engine.FindStageOf(id);
+            if (own != null) _held.Add(own);
+            RefreshNow(); // the other cards make room; the new card stays invisible until the picture has landed on it
+            flight.To = FitInto(visible, SlotOf(own) ?? StripArea());
             await overlay.AnimateAsync(SwapDuration);
-            _suppressRefresh = false;
-            Refresh(); // the new card fades in underneath the picture
+            RevealHeld();
             await overlay.FadeOutAsync(RevealFade);
         }
         catch (Exception ex)
@@ -759,6 +798,7 @@ public partial class StripWindow : Window
         {
             _overlay?.Dismiss();
             _overlay?.ReleaseSoon();
+            RevealHeld();
             _swapInProgress = false;
             _suppressRefresh = false;
             Refresh();
@@ -784,21 +824,25 @@ public partial class StripWindow : Window
         long prepared = clock.ElapsedMilliseconds, shown = 0, parked = 0, animated = 0, presented = 0;
 
         _swapInProgress = true;
+        _suppressRefresh = true;
         _stageLeavingStrip = item.Stage;
         try
         {
             var stripArea = StripArea();
             var cardRect = ScreenRectOf(item) ?? stripArea;
-            var topSlot = (Items.Count > 0 ? ScreenRectOf(Items[0]) : null) ?? cardRect;
-            AnimateLayoutChange(() => Items.Remove(item)); // the cards below slide up into the gap
 
-            // Pictures cover only the visible part of a window, so they fly between visible rectangles.
+            // Pictures cover only the visible part of a window, so they fly between visible rectangles. The outgoing
+            // ones are bound for the card the strip is about to make for their stage; until it exists they aim at
+            // the strip as a whole, which also makes the overlay cover the whole band.
             var flights = new List<SwapOverlay.Flight>();
+            var outgoing = new List<(SwapOverlay.Flight Flight, RectPx Visible)>();
             foreach (var o in swap.Outgoing)
             {
                 if (o.Snapshot == null) continue;
                 var visible = o.Snapshot.VisibleArea(o.Bounds);
-                flights.Add(new SwapOverlay.Flight(FlightPicture(o.Id, o.Snapshot), visible, FitInto(visible, topSlot)));
+                var flight = new SwapOverlay.Flight(FlightPicture(o.Id, o.Snapshot), visible, stripArea);
+                flights.Add(flight);
+                outgoing.Add((flight, visible));
             }
             foreach (var i in swap.Incoming)
             {
@@ -819,10 +863,19 @@ public partial class StripWindow : Window
             shown = clock.ElapsedMilliseconds;
             _engine.CommitPark(swap);      // the real outgoing windows vanish underneath their pictures
             parked = clock.ElapsedMilliseconds;
+
+            // The strip rearranges now: the clicked card goes and the outgoing stage's card appears, invisible until
+            // its pictures have landed on it. Where that card ends up is where the pictures go.
+            if (swap.From != null) _held.Add(swap.From);
+            RefreshNow();
+            var slot = SlotOf(swap.From) ?? cardRect;
+            foreach (var (flight, visible) in outgoing) flight.To = FitInto(visible, slot);
+
             await overlay.AnimateAsync(SwapDuration);
             animated = clock.ElapsedMilliseconds;
-            _engine.CommitPresent(swap);   // the real incoming windows appear underneath their pictures; the new card fades in
+            _engine.CommitPresent(swap);   // the real incoming windows appear underneath their pictures
             presented = clock.ElapsedMilliseconds;
+            RevealHeld();                  // the new card fades in while the pictures dissolve
             await overlay.FadeOutAsync(RevealFade); // the pictures dissolve into the real windows as they paint
             Log.Write($"swap timing ms: prepare {prepared}, overlay {shown - prepared}, park {parked - shown}, animate {animated - parked}, present {presented - animated}");
         }
@@ -835,8 +888,10 @@ public partial class StripWindow : Window
         {
             _overlay?.Dismiss();
             _overlay?.ReleaseSoon();
+            RevealHeld();
             _swapInProgress = false;
             _stageLeavingStrip = null;
+            _suppressRefresh = false;
             Refresh();
         }
     }

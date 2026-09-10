@@ -21,8 +21,15 @@ namespace StageManager.App;
 /// </summary>
 internal sealed class SwapOverlay : Window
 {
-    /// <summary>A picture that travels from one screen rectangle to another, both in physical pixels.</summary>
-    public sealed record Flight(BitmapSource Image, RectPx From, RectPx To);
+    /// <summary>
+    /// A picture that travels from one screen rectangle to another, both in physical pixels. The destination may be
+    /// changed after <see cref="PresentAsync"/>, up until <see cref="AnimateAsync"/>, for pictures bound for a card
+    /// that does not exist yet; the provisional one still counts towards the area the overlay covers.
+    /// </summary>
+    public sealed record Flight(BitmapSource Image, RectPx From, RectPx To)
+    {
+        public RectPx To { get; set; } = To;
+    }
 
     private const double CornerRadiusDip = 8;
     private const int AnimationMarginPx = 64; // room for the shadow and the spring's slight overshoot
@@ -149,10 +156,7 @@ internal sealed class SwapOverlay : Window
         }
 
         var storyboard = new Storyboard();
-        // Gentler than the default spring, which arrives within a third of the duration and then sits still: the
-        // pictures cross most of the screen, and a swap reads better when they visibly decelerate the whole way.
-        // With these values the flight is 43% done at a fifth of the duration, 91% at half, settled by the end.
-        var easing = new SpringEase { Damping = 0.9, Frequency = 7 };
+        var easing = new SpringEase(); // the same curve the strip moves its cards on, so the two motions read as one
         foreach (var (element, flight) in _flights)
         {
             var (left, top, width, height) = ToDip(flight.To);

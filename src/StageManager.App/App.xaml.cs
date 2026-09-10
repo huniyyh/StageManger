@@ -82,6 +82,17 @@ public partial class App : System.Windows.Application
         if (e.Args.Contains("--enable")) Toggle();
         if (e.Args.Contains("--check-updates")) _ = CheckForUpdatesAsync(interactive: false);
 
+        // "--startup on | on-enabled | off" sets the run-at-logon choice from the command line (scripts, tests).
+        int startupIndex = Array.IndexOf(e.Args, "--startup");
+        if (startupIndex >= 0 && startupIndex + 1 < e.Args.Length)
+        {
+            var choice = e.Args[startupIndex + 1].ToLowerInvariant();
+            StartupRegistration.Write(runAtLogon: choice != "off", startEnabled: choice == "on-enabled");
+        }
+
+        if (Program.IsFirstRun)
+            _tray.ShowBalloon("Stage Manager 설치됨", "트레이 아이콘이나 Ctrl+Alt+S 로 켜세요. 트레이 메뉴에서 Windows 시작 시 실행을 켤 수 있습니다.");
+
         // "--exit-after N" quits after N seconds; used by smoke tests.
         int exitIndex = Array.IndexOf(e.Args, "--exit-after");
         if (exitIndex >= 0 && exitIndex + 1 < e.Args.Length && int.TryParse(e.Args[exitIndex + 1], out int seconds))

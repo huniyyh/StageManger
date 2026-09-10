@@ -8,10 +8,16 @@ namespace StageManager.App;
 /// </summary>
 public static class Program
 {
+    /// <summary>True the first time the app runs after being installed.</summary>
+    public static bool IsFirstRun { get; private set; }
+
     [STAThread]
     public static void Main(string[] args)
     {
-        VelopackApp.Build().Run();
+        VelopackApp.Build()
+            .OnFirstRun(_ => IsFirstRun = true)
+            .OnBeforeUninstallFastCallback(_ => StartupRegistration.Remove())
+            .Run();
 
         var app = new App();
         app.InitializeComponent();

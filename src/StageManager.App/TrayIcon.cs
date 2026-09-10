@@ -11,6 +11,8 @@ internal sealed class TrayIcon : IDisposable
     private readonly NotifyIcon _icon;
     private readonly ToolStripMenuItem _toggle;
     private readonly ToolStripMenuItem _applyUpdate;
+    private readonly ToolStripMenuItem _runAtLogon;
+    private readonly ToolStripMenuItem _startEnabled;
     private readonly Action _toggleAction;
     private Action? _applyUpdateAction;
     private DateTime _lastClickToggle = DateTime.MinValue;
@@ -21,6 +23,13 @@ internal sealed class TrayIcon : IDisposable
         var menu = new ContextMenuStrip();
         _toggle = new ToolStripMenuItem(EnableText);
         _toggle.Click += (_, _) => toggle();
+
+        _runAtLogon = new ToolStripMenuItem("Windows 시작 시 실행") { CheckOnClick = true };
+        _startEnabled = new ToolStripMenuItem("시작 시 바로 켜기") { CheckOnClick = true };
+        _runAtLogon.CheckedChanged += (_, _) => OnStartupChoiceChanged();
+        _startEnabled.CheckedChanged += (_, _) => OnStartupChoiceChanged();
+        menu.Opening += (_, _) => RefreshStartupChoice(); // reflect changes made in Settings or by the uninstaller
+
         var check = new ToolStripMenuItem("업데이트 확인");
         check.Click += (_, _) => checkUpdates();
         _applyUpdate = new ToolStripMenuItem("업데이트 적용 (재시작)") { Visible = false };
@@ -29,10 +38,14 @@ internal sealed class TrayIcon : IDisposable
         quit.Click += (_, _) => exit();
         menu.Items.Add(_toggle);
         menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add(_runAtLogon);
+        menu.Items.Add(_startEnabled);
+        menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(check);
         menu.Items.Add(_applyUpdate);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(quit);
+        RefreshStartupChoice();
 
         _icon = new NotifyIcon
         {
@@ -54,6 +67,28 @@ internal sealed class TrayIcon : IDisposable
 
     public void ShowBalloon(string title, string text)
         => _icon.ShowBalloonTip(3000, title, text, ToolTipIcon.Info);
+
+    private bool _refreshingStartupChoice;
+
+    private void RefreshStartupChoice()
+    {
+        var (runAtLogon, startEnabled) = StartupRegistration.Read();
+        _refreshingStartupChoice = true;
+        try
+        {
+            _runAtLogon.Checked = runAtLogon;
+            _startEnabled.Checked = startEnabled;
+            _startEnabled.Enabled = runAtLogon;
+        }
+        finally { _refreshingStartupChoice = false; }
+    }
+
+    private void OnStartupChoiceChanged()
+    {
+        if (_refreshingStartupChoice) return;
+        StartupRegistration.Write(_runAtLogon.Checked, _runAtLogon.Checked && _startEnabled.Checked);
+        RefreshStartupChoice();
+    }
 
     /// <summary>Offers a downloaded update: a menu item appears and a balloon that applies it when clicked.</summary>
     public void ShowUpdateReady(string version, Action apply)

@@ -171,9 +171,43 @@ internal sealed class SwapOverlay : Window
     }
 
     /// <summary>
+    /// Completes once the pictures are on screen where the animation left them. The animation clock finishes before
+    /// the frame with its final values has been rendered and composed, and without a GPU that frame trails the clock
+    /// by up to a couple of hundred milliseconds. A real window shown before then appears in place while its picture
+    /// is still visibly on the way, and the two slide across each other during the dissolve.
+    /// </summary>
+    public async Task LandedAsync()
+    {
+        await RenderedFramesAsync(2, TimeSpan.FromMilliseconds(400));
+        await ComposedAsync();
+    }
+
+    /// <summary>Completes after the desktop compositor has put the latest changes of every window on screen.</summary>
+    public static Task ComposedAsync() => Task.Run(NativeWindow.DwmFlush);
+
+    /// <summary>
+    /// Waits for WPF to begin <paramref name="count"/> more frames. WPF starts a frame only after the previous one has
+    /// been presented, so by the second the frame carrying the animation's final values is out.
+    /// </summary>
+    private static async Task RenderedFramesAsync(int count, TimeSpan timeout)
+    {
+        var done = new TaskCompletionSource();
+        int seen = 0;
+        void OnRendering(object? sender, EventArgs e)
+        {
+            if (++seen >= count) done.TrySetResult();
+        }
+        CompositionTarget.Rendering += OnRendering;
+        try { await Task.WhenAny(done.Task, Task.Delay(timeout)); }
+        finally { CompositionTarget.Rendering -= OnRendering; }
+    }
+
+    /// <summary>
     /// Dissolves the pictures over <paramref name="duration"/>. A picture is a scaled snapshot and the window
-    /// underneath is sharper, so fading rather than cutting keeps the hand-over from reading as a snap into focus;
-    /// it also covers the first frames in which a freshly shown window may not have painted yet.
+    /// underneath is sharper, so fading rather than cutting keeps the hand-over from reading as a snap into focus.
+    /// Call it only once the pictures have landed and the windows are on screen (<see cref="LandedAsync"/>,
+    /// <see cref="ComposedAsync"/>): then the two line up exactly and all that shows is a window that changed while
+    /// it was parked, which is also why the dissolve is kept short.
     /// </summary>
     public Task FadeOutAsync(TimeSpan duration)
     {

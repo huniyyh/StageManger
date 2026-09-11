@@ -25,6 +25,16 @@ public sealed class SpringEase : EasingFunctionBase
 
     protected override double EaseInCore(double t)
     {
+        // WPF holds whatever the curve gives at t = 1, so a spring that has not quite settled by then leaves the value
+        // short of its target: 0.4% with the defaults, about 6 px on a flight across the screen. On a swap that gap
+        // shows as a sliver of the real window beside its picture and a doubled image during the dissolve. Dividing
+        // by the value at the end makes the curve finish exactly on target without changing its shape.
+        double end = Response(1);
+        return end > 0 ? Response(t) / end : t;
+    }
+
+    private double Response(double t)
+    {
         double zeta = Math.Clamp(Damping, 0.05, 0.999);
         double omega = Frequency;
         double damped = omega * Math.Sqrt(1 - zeta * zeta);

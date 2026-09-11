@@ -20,7 +20,7 @@ public partial class StripWindow : Window
     private const double MarginDip = 12;
     private const int DragThresholdPx = 6;
     private static readonly TimeSpan SwapDuration = TimeSpan.FromMilliseconds(480);
-    private static readonly TimeSpan RevealFade = TimeSpan.FromMilliseconds(260); // the pictures dissolve into the real windows over this
+    private static readonly TimeSpan RevealFade = TimeSpan.FromMilliseconds(180); // the pictures dissolve into the real windows over this; short, because a window that changed while parked shows through its old picture
     private static readonly TimeSpan CardSlideDuration = TimeSpan.FromMilliseconds(420); // cards closing a gap or making room, on the same spring as the flights and a little ahead of them
     private static readonly TimeSpan CardFadeDuration = TimeSpan.FromMilliseconds(280);
     private static readonly TimeSpan StripSlideDuration = TimeSpan.FromMilliseconds(220);
@@ -713,8 +713,10 @@ public partial class StripWindow : Window
             var overlay = Overlay();
             await overlay.PresentAsync(flights, _ws.GetPrimaryWorkArea()); // replaces the ghost with the same picture in the same place
             await overlay.AnimateAsync(SwapDuration);
+            await overlay.LandedAsync(); // the picture is visibly in place before the windows appear under it
             _engine.MergeIntoActive(stage, anchor, suppressTransitions: true); // the real windows appear underneath the picture
             RefreshNow(); // the card goes and the others close ranks
+            await SwapOverlay.ComposedAsync();
             await overlay.FadeOutAsync(RevealFade); // the picture dissolves into the real window rather than snapping to it
         }
         catch (Exception ex)
@@ -786,6 +788,7 @@ public partial class StripWindow : Window
             RefreshNow(); // the other cards make room; the new card stays invisible until the picture has landed on it
             flight.To = FitInto(visible, SlotOf(own) ?? StripArea());
             await overlay.AnimateAsync(SwapDuration);
+            await overlay.LandedAsync(); // the card appears when the picture is visibly on it
             RevealHeld();
             await overlay.FadeOutAsync(RevealFade);
         }
@@ -821,7 +824,7 @@ public partial class StripWindow : Window
         var clock = System.Diagnostics.Stopwatch.StartNew();
         var swap = _engine.PrepareSwap(item.Stage, suppressTransitions: true);
         if (swap == null) return;
-        long prepared = clock.ElapsedMilliseconds, shown = 0, parked = 0, animated = 0, presented = 0;
+        long prepared = clock.ElapsedMilliseconds, shown = 0, parked = 0, animated = 0, landed = 0, presented = 0;
 
         _swapInProgress = true;
         _suppressRefresh = true;
@@ -873,11 +876,14 @@ public partial class StripWindow : Window
 
             await overlay.AnimateAsync(SwapDuration);
             animated = clock.ElapsedMilliseconds;
+            await overlay.LandedAsync();   // the pictures are where the windows will be on screen, not just on the clock
+            landed = clock.ElapsedMilliseconds;
             _engine.CommitPresent(swap);   // the real incoming windows appear underneath their pictures
             presented = clock.ElapsedMilliseconds;
+            await SwapOverlay.ComposedAsync(); // and are on screen before their pictures begin to go
             RevealHeld();                  // the new card fades in while the pictures dissolve
-            await overlay.FadeOutAsync(RevealFade); // the pictures dissolve into the real windows as they paint
-            Log.Write($"swap timing ms: prepare {prepared}, overlay {shown - prepared}, park {parked - shown}, animate {animated - parked}, present {presented - animated}");
+            await overlay.FadeOutAsync(RevealFade);
+            Log.Write($"swap timing ms: prepare {prepared}, overlay {shown - prepared}, park {parked - shown}, animate {animated - parked}, land {landed - animated}, present {presented - landed}");
         }
         catch (Exception ex)
         {

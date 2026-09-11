@@ -79,4 +79,7 @@ public static class NativeWindow
     }
 
     public static void UnregisterHotKey(nint hwnd, int id) => PInvoke.UnregisterHotKey(new HWND(hwnd), id);
+
+    /// <summary>Blocks until the desktop compositor has presented its next frame.</summary>
+    public static void DwmFlush() => PInvoke.DwmFlush();
 }

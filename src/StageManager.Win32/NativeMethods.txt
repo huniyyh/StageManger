@@ -89,3 +89,4 @@ SHGFI_FLAGS
 
 // Display adapters (GPU detection without WMI)
 EnumDisplayDevices
+DwmFlush
